@@ -1,0 +1,16 @@
+{
+  "name": "trinh-ky-online-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Hệ thống Quản lý Quy trình Ký giấy tờ & Biểu mẫu trực tuyến cho Tập đoàn",
+  "scripts": {
+    "dev": "pnpm --filter \"./apps/*\" --parallel dev",
+    "build": "pnpm --filter \"./packages/*\" build && pnpm --filter \"./apps/*\" build",
+    "test": "pnpm --filter \"./packages/shared\" test",
+    "lint": "pnpm --recursive lint"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2",
+    "prettier": "^3.4.2"
+  }
+}

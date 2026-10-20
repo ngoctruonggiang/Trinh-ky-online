@@ -1,0 +1,365 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// -------------------------------------------------------------
+// 1. TỔ CHỨC & NGƯỜI DÙNG (Multi-Company & Department)
+// -------------------------------------------------------------
+
+enum UserRole {
+  SUPER_ADMIN // Admin tập đoàn: quản trị toàn bộ hệ thống
+  ADMIN       // Admin phòng ban
+  USER        // Nhân viên thông thường
+}
+
+model Organization {
+  id        String   @id @default(uuid())
+  code      String   @unique // Mã công ty (VD: VGR-HQ, VGR-TECH, VGR-LOGISTICS)
+  name      String   // Tên công ty thành viên
+  parentId  String?  // Id công ty mẹ nếu là phân cấp tập đoàn
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  parent       Organization?  @relation("OrgHierarchy", fields: [parentId], references: [id])
+  children     Organization[] @relation("OrgHierarchy")
+  departments  Department[]
+  users        User[]
+  documents    Document[]
+
+  @@map("organizations")
+}
+
+model Department {
+  id             String       @id @default(uuid())
+  organizationId String
+  code           String       // Mã phòng ban (VD: IT, HR, ACCT)
+  name           String       // Tên phòng ban
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  users          User[]
+  documents      Document[]
+
+  @@unique([organizationId, code])
+  @@map("departments")
+}
+
+model User {
+  id             String       @id @default(uuid())
+  email          String       @unique
+  passwordHash   String
+  fullName       String
+  positionTitle  String?      // Chức danh (Trưởng phòng, Kế toán trưởng, ...)
+  role           UserRole     @default(USER)
+  organizationId String?
+  departmentId   String?
+  signatureUrl   String?      // Ảnh chữ ký cá nhân mặc định
+  isActive       Boolean      @default(true)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+  department     Department?   @relation(fields: [departmentId], references: [id])
+
+  createdTemplates  FormTemplate[]
+  createdDocuments  Document[]          @relation("DocumentCreator")
+  assignedSteps     StepAssignee[]
+  signatures        SignatureEvent[]
+  comments          DocumentComment[]
+  auditLogs         AuditLog[]
+
+  @@map("users")
+}
+
+// -------------------------------------------------------------
+// 2. BIỂU MẪU ĐỘNG (Dynamic Form & Block Layout - TopCV style)
+// -------------------------------------------------------------
+
+enum TemplateStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+model FormTemplate {
+  id                   String         @id @default(uuid())
+  code                 String         @unique // VD: TAM_UNG, NGHI_PHEP
+  title                String         // VD: Giấy đề nghị tạm ứng
+  description          String?
+  category             String         @default("Hành chính - Nhân sự")
+  status               TemplateStatus @default(DRAFT)
+  
+  // JSON chứa danh sách field nhập liệu: id, name, label, type, required, options, columns...
+  fields               Json
+  // JSON chứa danh sách các Layout Block hiển thị tài liệu/PDF: header, text, grid, table, signature...
+  layoutBlocks         Json
+  // JSON cấu hình các bước duyệt mặc định của biểu mẫu
+  defaultWorkflowSteps Json?
+
+  createdById          String
+  createdAt            DateTime       @default(now())
+  updatedAt            DateTime       @updatedAt
+
+  createdBy            User           @relation(fields: [createdById], references: [id])
+  documents            Document[]
+
+  @@map("form_templates")
+}
+
+// -------------------------------------------------------------
+// 3. HỒ SƠ TRÌNH KÝ & PHIÊN BẢN (Documents & Versions)
+// -------------------------------------------------------------
+
+enum DocumentStatus {
+  DRAFT
+  SUBMITTED
+  IN_REVIEW
+  REVISION_REQUESTED
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+enum UrgencyLevel {
+  LOW
+  NORMAL
+  URGENT
+  EMERGENCY
+}
+
+model Document {
+  id                String         @id @default(uuid())
+  documentNumber    String         @unique // Mã số tự tăng: VD: TK-2026-0001
+  title             String         // Tiêu đề hồ sơ
+  templateId        String
+  status            DocumentStatus @default(DRAFT)
+  urgency           UrgencyLevel   @default(NORMAL)
+  dueDate           DateTime?      // Hạn hoàn tất xử lý
+  currentStepOrder  Int            @default(1)
+  currentVersion    Int            @default(1)
+  
+  createdById       String
+  organizationId    String?
+  departmentId      String?
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+
+  template          FormTemplate   @relation(fields: [templateId], references: [id])
+  createdBy         User           @relation("DocumentCreator", fields: [createdById], references: [id])
+  organization      Organization?  @relation(fields: [organizationId], references: [id])
+  department        Department?    @relation(fields: [departmentId], references: [id])
+
+  versions          DocumentVersion[]
+  attachments       DocumentAttachment[]
+  workflow          ApprovalWorkflow?
+  signatureEvents   SignatureEvent[]
+  comments          DocumentComment[]
+  auditLogs         AuditLog[]
+
+  @@index([status])
+  @@index([createdById])
+  @@map("documents")
+}
+
+model DocumentVersion {
+  id             String   @id @default(uuid())
+  documentId     String
+  versionNumber  Int
+  // Dữ liệu người dùng điền theo các fields của template
+  formData       Json
+  // HTML snapshot tại thời điểm gửi duyệt
+  renderedHtml   String?  @db.Text
+  // Đường dẫn file PDF đã kết xuất (nếu có)
+  pdfUrl         String?
+  // Mã SHA-256 băm toàn vẹn nội dung tại phiên bản này
+  sha256Hash     String
+  changeSummary  String?  // Lý do chỉnh sửa so với version trước
+  createdById    String
+  createdAt      DateTime @default(now())
+
+  document       Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  signatures     SignatureEvent[]
+
+  @@unique([documentId, versionNumber])
+  @@map("document_versions")
+}
+
+model DocumentAttachment {
+  id             String   @id @default(uuid())
+  documentId     String
+  fileName       String
+  fileUrl        String
+  fileSize       Int      // Dung lượng file tính bằng bytes
+  mimeType       String
+  uploadedById   String
+  createdAt      DateTime @default(now())
+
+  document       Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@map("document_attachments")
+}
+
+// -------------------------------------------------------------
+// 4. QUY TRÌNH DUYỆT & CÁC BƯỚC (Approval Workflow Engine)
+// -------------------------------------------------------------
+
+enum WorkflowStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  REJECTED
+  CANCELLED
+}
+
+enum StepType {
+  SEQUENTIAL
+  PARALLEL
+}
+
+enum StepCompletionRule {
+  ALL_MUST_APPROVE
+  ANY_CAN_APPROVE
+}
+
+enum StepStatus {
+  WAITING
+  IN_PROGRESS
+  COMPLETED
+  REJECTED
+  REVISION_REQUESTED
+  SKIPPED
+  CANCELLED
+}
+
+enum AssigneeRole {
+  APPROVER // Người duyệt: có thẩm quyền Duyệt/Ký hoặc Từ chối
+  REVIEWER // Người giám sát: chỉ xem, nhận thông báo và bình luận
+}
+
+enum AssigneeDecision {
+  PENDING
+  APPROVED
+  REJECTED
+  REVISION_REQUESTED
+}
+
+model ApprovalWorkflow {
+  id               String         @id @default(uuid())
+  documentId       String         @unique
+  status           WorkflowStatus @default(PENDING)
+  currentStepOrder Int            @default(1)
+  startedAt        DateTime?
+  completedAt      DateTime?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  document         Document       @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  steps            ApprovalStep[]
+
+  @@map("approval_workflows")
+}
+
+model ApprovalStep {
+  id             String             @id @default(uuid())
+  workflowId     String
+  stepOrder      Int                // Thứ tự bước: 1, 2, 3...
+  stepName       String             // Tên bước: VD: "Trưởng phòng duyệt", "Kế toán trưởng"
+  stepType       StepType           @default(SEQUENTIAL)
+  completionRule StepCompletionRule @default(ALL_MUST_APPROVE)
+  status         StepStatus         @default(WAITING)
+  startedAt      DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  workflow       ApprovalWorkflow   @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  assignees      StepAssignee[]
+  signatures     SignatureEvent[]
+  comments       DocumentComment[]
+
+  @@unique([workflowId, stepOrder])
+  @@map("approval_steps")
+}
+
+model StepAssignee {
+  id              String           @id @default(uuid())
+  stepId          String
+  userId          String
+  role            AssigneeRole     @default(APPROVER) // APPROVER hoặc REVIEWER
+  decision        AssigneeDecision @default(PENDING)
+  decisionComment String?
+  decidedAt       DateTime?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  step            ApprovalStep     @relation(fields: [stepId], references: [id], onDelete: Cascade)
+  user            User             @relation(fields: [userId], references: [id])
+
+  @@unique([stepId, userId])
+  @@map("step_assignees")
+}
+
+// -------------------------------------------------------------
+// 5. CHỮ KÝ ĐIỆN TỬ & KIỂM TOÁN (Signature & Audit Trail)
+// -------------------------------------------------------------
+
+model SignatureEvent {
+  id                String          @id @default(uuid())
+  documentId        String
+  documentVersionId String
+  stepId            String?
+  userId            String
+  signatureImageUrl String          // Đường dẫn ảnh chữ ký đã chèn
+  contentHash       String          // Mã SHA-256 của phiên bản tài liệu lúc ký
+  ipAddress         String?
+  userAgent         String?
+  signedAt          DateTime        @default(now())
+  isValid           Boolean         @default(true) // false nếu bị vô hiệu do yêu cầu sửa
+  invalidatedReason String?
+  invalidatedAt     DateTime?
+
+  document          Document        @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  documentVersion   DocumentVersion @relation(fields: [documentVersionId], references: [id], onDelete: Cascade)
+  step              ApprovalStep?   @relation(fields: [stepId], references: [id])
+  user              User            @relation(fields: [userId], references: [id])
+
+  @@map("signature_events")
+}
+
+model DocumentComment {
+  id         String        @id @default(uuid())
+  documentId String
+  stepId     String?
+  userId     String
+  content    String
+  createdAt  DateTime      @default(now())
+
+  document   Document      @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  step       ApprovalStep? @relation(fields: [stepId], references: [id])
+  user       User          @relation(fields: [userId], references: [id])
+
+  @@map("document_comments")
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  documentId String?
+  userId     String?
+  action     String   // VD: SUBMIT_DOCUMENT, APPROVE_STEP, REQUEST_REVISION...
+  details    Json?    // Chi tiết thay đổi hoặc payload
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+
+  document   Document? @relation(fields: [documentId], references: [id], onDelete: SetNull)
+  user       User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([documentId])
+  @@index([action])
+  @@map("audit_logs")
+}
