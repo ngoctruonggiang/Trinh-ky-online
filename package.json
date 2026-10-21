@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "pnpm --filter \"./apps/*\" --parallel dev",
     "build": "pnpm --filter \"./packages/*\" build && pnpm --filter \"./apps/*\" build",
-    "test": "pnpm --filter \"./packages/*\" test && pnpm --filter \"./apps/api\" test",
+    "test": "pnpm --filter \"./packages/*\" test && pnpm --filter \"./apps/api\" test && pnpm --filter \"./apps/web\" test",
     "lint": "pnpm --recursive lint"
   },
   "devDependencies": {
