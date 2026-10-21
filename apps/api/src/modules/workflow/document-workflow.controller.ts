@@ -2,11 +2,13 @@ import {
   Body,
   Controller,
   ForbiddenException,
+  Get,
   HttpCode,
   HttpStatus,
   NotFoundException,
   Param,
   Post,
+  Query,
   Req,
   UseFilters,
   UseGuards,
@@ -20,15 +22,17 @@ import { UserPrincipal } from '../../common/interfaces/user-principal.interface.
 import { WorkflowExceptionFilter } from '../../common/filters/workflow-exception.filter.js';
 import { PrismaService } from '../../common/prisma/prisma.service.js';
 import { WorkflowOrchestratorService } from './workflow-orchestrator.service.js';
+import { DocumentReadService } from './document-read.service.js';
+import { GetDocumentsQueryDto } from './dto/get-documents-query.dto.js';
 import { ProcessDecisionDto } from './dto/process-decision.dto.js';
 import { ResubmitDocumentDto } from './dto/resubmit-document.dto.js';
+import { CancelDocumentDto } from './dto/cancel-document.dto.js';
 
 interface HttpRequest {
   ip?: string;
   headers: Record<string, string | string[] | undefined>;
   user?: any;
 }
-import { CancelDocumentDto } from './dto/cancel-document.dto.js';
 
 @Controller('api/documents')
 @UseGuards(AuthGuard)
@@ -37,8 +41,46 @@ import { CancelDocumentDto } from './dto/cancel-document.dto.js';
 export class DocumentWorkflowController {
   constructor(
     private readonly orchestrator: WorkflowOrchestratorService,
-    private readonly prisma: PrismaService
+    private readonly prisma: PrismaService,
+    private readonly readService: DocumentReadService
   ) {}
+
+  /**
+   * Endpoint 1: Lấy danh sách hồ sơ trình ký (GET /api/documents)
+   * Phân trang, lọc theo tab/status, tìm kiếm và bảo vệ ranh giới tổ chức
+   */
+  @Get()
+  @HttpCode(HttpStatus.OK)
+  async getDocuments(
+    @Query() query: GetDocumentsQueryDto,
+    @CurrentUser() user: UserPrincipal
+  ) {
+    const result = await this.readService.getDocuments(user, query);
+    return {
+      success: true,
+      data: result,
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * Endpoint 2: Lấy chi tiết hồ sơ trình ký (GET /api/documents/:id)
+   * Trả về toàn bộ phiên bản, workflow, lịch sử, chữ ký số và phân quyền được tính sẵn
+   */
+  @Get(':id')
+  @HttpCode(HttpStatus.OK)
+  async getDocumentById(
+    @Param('id') id: string,
+    @CurrentUser() user: UserPrincipal
+  ) {
+    const result = await this.readService.getDocumentDetail(id, user);
+    return {
+      success: true,
+      data: result,
+      timestamp: new Date().toISOString(),
+    };
+  }
+
 
   /**
    * Helper: Kiểm tra quyền sở hữu hoặc quyền quản trị trên hồ sơ theo phân quyền tổ chức

@@ -142,3 +142,60 @@ export interface ResubmitPayload {
 export interface CancelPayload {
   cancelReason?: string;
 }
+
+export interface DocumentPagination {
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+}
+
+export interface DocumentListResult {
+  items: DocumentItem[];
+  pagination: DocumentPagination;
+}
+
+export interface DocumentListQuery {
+  page?: number;
+  limit?: number;
+  search?: string;
+  status?: DocumentStatus | string;
+}
+
+export class ApiError extends Error {
+  constructor(
+    public readonly statusCode: number,
+    public readonly code: string,
+    message: string,
+    public readonly details?: any
+  ) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
+export interface IDocumentService {
+  getCurrentUser(): Promise<UserProfile>;
+  getDocuments(
+    tab: 'pending_my_approval' | 'my_documents' | 'all',
+    query?: DocumentListQuery
+  ): Promise<DocumentItem[]>;
+  getDocumentList?(
+    tab: 'pending_my_approval' | 'my_documents' | 'all',
+    query?: DocumentListQuery
+  ): Promise<DocumentListResult>;
+  getDocumentDetail(id: string): Promise<DocumentDetail>;
+  processDecision(
+    id: string,
+    payload: ProcessDecisionPayload
+  ): Promise<{ success: boolean; documentStatus: DocumentStatus }>;
+  resubmitDocument(
+    id: string,
+    payload: ResubmitPayload
+  ): Promise<{ success: boolean; newVersionNumber: number }>;
+  cancelDocument(
+    id: string,
+    payload: CancelPayload
+  ): Promise<{ success: boolean }>;
+}
+

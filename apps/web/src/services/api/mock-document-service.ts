@@ -14,9 +14,12 @@ import {
   StepType,
   StepCompletionRule,
   UserRole,
+  IDocumentService,
+  DocumentListQuery,
+  DocumentListResult,
 } from '@/types/document';
 
-export class MockDocumentService {
+export class MockDocumentService implements IDocumentService {
   private currentUser: UserProfile = {
     id: 'user-current-tp',
     email: 'nguyen.van.a@vinagroup.vn',
@@ -353,25 +356,63 @@ export class MockDocumentService {
     return this.currentUser;
   }
 
-  public async getDocuments(tab: 'pending_my_approval' | 'my_documents' | 'all'): Promise<DocumentItem[]> {
+  public async getDocuments(
+    tab: 'pending_my_approval' | 'my_documents' | 'all',
+    query?: DocumentListQuery
+  ): Promise<DocumentItem[]> {
     await this.delay(250);
     const userId = this.currentUser.id;
 
+    let result = this.documents;
+
     if (tab === 'pending_my_approval') {
-      return this.documents.filter((doc) => {
+      result = this.documents.filter((doc) => {
         if (doc.status !== DocumentStatus.IN_REVIEW) return false;
         const currentStep = doc.workflow.steps.find((s) => s.stepOrder === doc.currentStepOrder);
         return currentStep?.assignees.some(
           (a) => a.userId === userId && a.decision === AssigneeDecision.PENDING && a.role === AssigneeRole.APPROVER
         );
       });
+    } else if (tab === 'my_documents') {
+      result = this.documents.filter((doc) => doc.createdById === userId);
     }
 
-    if (tab === 'my_documents') {
-      return this.documents.filter((doc) => doc.createdById === userId);
+    if (query?.status && query.status !== 'ALL') {
+      result = result.filter((doc) => doc.status === query.status);
     }
 
-    return this.documents;
+    if (query?.search?.trim()) {
+      const s = query.search.toLowerCase();
+      result = result.filter(
+        (doc) =>
+          doc.title.toLowerCase().includes(s) ||
+          doc.documentNumber.toLowerCase().includes(s)
+      );
+    }
+
+    return result;
+  }
+
+  public async getDocumentList(
+    tab: 'pending_my_approval' | 'my_documents' | 'all',
+    query?: DocumentListQuery
+  ): Promise<DocumentListResult> {
+    const items = await this.getDocuments(tab, query);
+    const page = query?.page || 1;
+    const limit = query?.limit || 10;
+    const total = items.length;
+    const startIndex = (page - 1) * limit;
+    const paginatedItems = items.slice(startIndex, startIndex + limit);
+
+    return {
+      items: paginatedItems,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit) || 1,
+      },
+    };
   }
 
   public async getDocumentDetail(id: string): Promise<DocumentDetail> {

@@ -22,6 +22,7 @@ describe('DocumentWorkflowController & Security Review (API Layer)', () => {
   let controller: DocumentWorkflowController;
   let mockOrchestrator: any;
   let mockPrisma: any;
+  let mockReadService: any;
 
   // Người dùng thuộc Công ty HQ
   const mockUserHq: UserPrincipal = {
@@ -89,7 +90,12 @@ describe('DocumentWorkflowController & Security Review (API Layer)', () => {
       },
     };
 
-    controller = new DocumentWorkflowController(mockOrchestrator, mockPrisma);
+    mockReadService = {
+      getDocuments: vi.fn(),
+      getDocumentDetail: vi.fn(),
+    };
+
+    controller = new DocumentWorkflowController(mockOrchestrator, mockPrisma, mockReadService);
   });
 
   describe('1. submitDocument (POST /api/documents/:id/submit)', () => {
@@ -728,4 +734,36 @@ describe('DocumentWorkflowController & Security Review (API Layer)', () => {
       expect(capture.json.error.stack).toBeUndefined();
     });
   });
+
+  describe('7. Read Endpoints (GET /api/documents & GET /api/documents/:id)', () => {
+    it('7.1. getDocuments ủy quyền đúng cho DocumentReadService với query và principal', async () => {
+      const mockResult = {
+        items: [],
+        pagination: { page: 1, limit: 10, total: 0, totalPages: 1 },
+      };
+      mockReadService.getDocuments.mockResolvedValue(mockResult);
+
+      const query = { page: 1, limit: 10, tab: 'all' as const };
+      const response = await controller.getDocuments(query, mockUserHq);
+
+      expect(mockReadService.getDocuments).toHaveBeenCalledWith(mockUserHq, query);
+      expect(response.success).toBe(true);
+      expect(response.data).toEqual(mockResult);
+    });
+
+    it('7.2. getDocumentById ủy quyền đúng cho DocumentReadService với documentId và principal', async () => {
+      const mockDetail = {
+        id: 'doc-1',
+        title: 'Hồ sơ test',
+      };
+      mockReadService.getDocumentDetail.mockResolvedValue(mockDetail);
+
+      const response = await controller.getDocumentById('doc-1', mockUserHq);
+
+      expect(mockReadService.getDocumentDetail).toHaveBeenCalledWith('doc-1', mockUserHq);
+      expect(response.success).toBe(true);
+      expect(response.data).toEqual(mockDetail);
+    });
+  });
 });
+

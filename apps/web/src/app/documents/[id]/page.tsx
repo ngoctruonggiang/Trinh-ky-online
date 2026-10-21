@@ -20,7 +20,7 @@ import {
   ResubmitPayload,
   CancelPayload,
 } from '@/types/document';
-import { mockDocumentService } from '@/services/api/mock-document-service';
+import { documentService, isMockMode } from '@/services/api';
 import { StatusBadge, UrgencyBadge } from '@/components/ui/badge';
 import { WorkflowStepper } from '@/components/documents/workflow-stepper';
 import { WorkflowActionBox } from '@/components/documents/workflow-action-box';
@@ -45,10 +45,18 @@ export default function DocumentDetailPage({
       setLoading(true);
       setErrorMessage(null);
       setIsConflictError(false);
-      const data = await mockDocumentService.getDocumentDetail(documentId);
+      const data = await documentService.getDocumentDetail(documentId);
       setDocument(data);
     } catch (err: any) {
-      setErrorMessage(err.message || 'Không thể tải hồ sơ');
+      if (err.statusCode === 403) {
+        setErrorMessage('Bạn không có quyền truy cập hồ sơ này hoặc hồ sơ thuộc tổ chức khác (403 Forbidden).');
+      } else if (err.statusCode === 404) {
+        setErrorMessage('Không tìm thấy hồ sơ được yêu cầu (404 Not Found).');
+      } else if (err.statusCode === 401) {
+        setErrorMessage('Phiên làm việc đã hết hạn. Vui lòng đăng nhập lại (401 Unauthorized).');
+      } else {
+        setErrorMessage(err.message || 'Không thể tải chi tiết hồ sơ từ máy chủ.');
+      }
     } finally {
       setLoading(false);
     }
@@ -63,10 +71,10 @@ export default function DocumentDetailPage({
       setActionLoading(true);
       setErrorMessage(null);
       setIsConflictError(false);
-      await mockDocumentService.processDecision(documentId, payload);
+      await documentService.processDecision(documentId, payload);
       await loadDocument();
     } catch (err: any) {
-      if (err.code === 'CONCURRENCY_CONFLICT' || err.message?.includes('Xung đột')) {
+      if (err.code === 'CONCURRENCY_CONFLICT' || err.statusCode === 409 || err.message?.includes('Xung đột')) {
         setIsConflictError(true);
         setErrorMessage(err.message || 'Bước duyệt này đã được người duyệt khác xử lý trước đó.');
       } else {
@@ -82,7 +90,7 @@ export default function DocumentDetailPage({
     try {
       setActionLoading(true);
       setErrorMessage(null);
-      await mockDocumentService.resubmitDocument(documentId, payload);
+      await documentService.resubmitDocument(documentId, payload);
       await loadDocument();
     } catch (err: any) {
       setErrorMessage(err.message || 'Lỗi khi nộp lại hồ sơ');
@@ -96,7 +104,7 @@ export default function DocumentDetailPage({
     try {
       setActionLoading(true);
       setErrorMessage(null);
-      await mockDocumentService.cancelDocument(documentId, payload);
+      await documentService.cancelDocument(documentId, payload);
       await loadDocument();
     } catch (err: any) {
       setErrorMessage(err.message || 'Lỗi khi hủy hồ sơ');
@@ -157,6 +165,15 @@ export default function DocumentDetailPage({
               <span className="text-2xs font-medium px-2 py-0.5 rounded bg-indigo-50 text-indigo-700 border border-indigo-200">
                 Phiên bản v{document.currentVersion}
               </span>
+              {isMockMode ? (
+                <span className="text-2xs font-medium px-2 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">
+                  Giả lập (Mock)
+                </span>
+              ) : (
+                <span className="text-2xs font-medium px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">
+                  API Thật
+                </span>
+              )}
             </div>
             <h1 className="text-lg md:text-xl font-bold text-slate-900 leading-snug">
               {document.title}

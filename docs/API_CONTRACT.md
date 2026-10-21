@@ -210,7 +210,171 @@ Chủ động dừng hồ sơ không tiếp tục xử lý.
 
 ---
 
-## 4. NHỮNG GIỚI HẠN & LƯU Ý KHI GHÉP GIAO DIỆN (FRONTEND GOTCHAS)
+## 4. CHI TIẾT 3 READ ENDPOINTS (BỔ SUNG TẠI PHASE 9)
+
+### ⑤ Lấy danh sách hồ sơ trình ký (Get Documents)
+Truy vấn danh sách hồ sơ có phân trang, lọc và bảo vệ ranh giới tổ chức tại cấp database.
+
+- **Endpoint:** `GET /api/documents`
+- **Query Parameters:**
+  - `page` (Tùy chọn, mặc định `1`): Trang số.
+  - `limit` (Tùy chọn, mặc định `10`, tối đa `100`): Số lượng phần tử mỗi trang.
+  - `tab` (Tùy chọn, mặc định `all`): Chế độ danh sách:
+    - `pending_my_approval`: Các hồ sơ `IN_REVIEW` mà người dùng hiện tại là `APPROVER` trong bước `IN_PROGRESS` với quyết định `PENDING`.
+    - `my_documents`: Hồ sơ do chính người dùng hiện tại tạo (`createdById: user.id`).
+    - `all`: Toàn bộ hồ sơ trong phạm vi tổ chức của người dùng.
+  - `status` (Tùy chọn): Lọc theo `DocumentStatus` (`DRAFT`, `SUBMITTED`, `IN_REVIEW`, `REVISION_REQUESTED`, `APPROVED`, `REJECTED`, `CANCELLED`).
+  - `search` (Tùy chọn): Tìm kiếm từ khóa theo `title` hoặc `documentNumber` (không phân biệt hoa thường).
+- **Ranh giới Phân quyền Đa tổ chức:**
+  - `SUPER_ADMIN`: Có quyền truy vấn hồ sơ của toàn bộ tập đoàn.
+  - `ADMIN` & `USER`: Bắt buộc bị giới hạn `organizationId: user.organizationId` ở cấp SQL truy vấn.
+- **Response Thành Công (200 OK):**
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "id": "doc-001",
+        "documentNumber": "TK-2026-0001",
+        "title": "Giấy đề nghị tạm ứng công tác phí",
+        "templateCode": "TAM_UNG",
+        "templateTitle": "Giấy đề nghị tạm ứng",
+        "status": "IN_REVIEW",
+        "urgency": "URGENT",
+        "createdById": "user-emp-01",
+        "createdByName": "Trần Thị Bích",
+        "organizationId": "org-hq",
+        "organizationName": "VinaGroup HQ",
+        "departmentName": "Phòng CNTT",
+        "currentStepOrder": 1,
+        "totalSteps": 2,
+        "currentStepName": "Trưởng phòng thẩm tra",
+        "createdAt": "2026-10-20T08:30:00.000Z",
+        "updatedAt": "2026-10-20T08:30:00.000Z"
+      }
+    ],
+    "pagination": {
+      "page": 1,
+      "limit": 10,
+      "total": 1,
+      "totalPages": 1
+    }
+  },
+  "timestamp": "2026-10-21T10:15:00.000Z"
+}
+```
+
+---
+
+### ⑥ Lấy chi tiết hồ sơ trình ký (Get Document Detail)
+Truy vấn toàn bộ dữ liệu hồ sơ, phiên bản biểu mẫu, tiến trình workflow, lịch sử quyết định và chữ ký số.
+
+- **Endpoint:** `GET /api/documents/:id`
+- **Quyền hạn:**
+  - Người dùng thuộc cùng `organizationId` với hồ sơ hoặc `SUPER_ADMIN`.
+  - Người dùng thuộc tổ chức khác bị chặn `403 FORBIDDEN`.
+  - Không tìm thấy hồ sơ trả về `404 DOCUMENT_NOT_FOUND`.
+- **Response Thành Công (200 OK):**
+```json
+{
+  "success": true,
+  "data": {
+    "id": "doc-001",
+    "documentNumber": "TK-2026-0001",
+    "title": "Giấy đề nghị tạm ứng công tác phí",
+    "templateCode": "TAM_UNG",
+    "templateTitle": "Giấy đề nghị tạm ứng",
+    "status": "IN_REVIEW",
+    "urgency": "URGENT",
+    "createdById": "user-emp-01",
+    "createdByName": "Trần Thị Bích",
+    "organizationId": "org-hq",
+    "organizationName": "VinaGroup HQ",
+    "departmentName": "Phòng CNTT",
+    "currentStepOrder": 1,
+    "totalSteps": 2,
+    "currentStepName": "Trưởng phòng thẩm tra",
+    "createdAt": "2026-10-20T08:30:00.000Z",
+    "updatedAt": "2026-10-20T08:30:00.000Z",
+    "currentVersion": 1,
+    "activeVersion": {
+      "id": "ver-001",
+      "versionNumber": 1,
+      "formData": { "advanceAmount": 15000000, "reason": "Công tác Đà Nẵng" },
+      "sha256Hash": "a7c9f82d4b1e56312a0f8976bce43110294b8e3fa52c672b1d91653fa38b2910",
+      "changeSummary": "Bản nộp khởi tạo ban đầu",
+      "createdAt": "2026-10-20T08:30:00.000Z"
+    },
+    "versions": [ ... ],
+    "workflow": {
+      "id": "wf-001",
+      "status": "RUNNING",
+      "currentStepOrder": 1,
+      "steps": [
+        {
+          "id": "step-001",
+          "stepOrder": 1,
+          "stepName": "Trưởng phòng thẩm tra",
+          "stepType": "SEQUENTIAL",
+          "completionRule": "ALL_MUST_APPROVE",
+          "status": "IN_PROGRESS",
+          "assignees": [
+            {
+              "id": "asg-001",
+              "userId": "user-tp-id",
+              "userName": "Nguyễn Văn An",
+              "userEmail": "an.nv@vinagroup.vn",
+              "role": "APPROVER",
+              "decision": "PENDING"
+            }
+          ]
+        }
+      ]
+    },
+    "decisionHistories": [],
+    "signatures": [],
+    "permissions": {
+      "canApprove": true,
+      "canResubmit": false,
+      "canCancel": false,
+      "isCreator": false,
+      "isAdmin": false,
+      "currentStepAssigneeRole": "APPROVER"
+    }
+  },
+  "timestamp": "2026-10-21T10:15:00.000Z"
+}
+```
+
+---
+
+### ⑦ Lấy thông tin người dùng hiện tại (Get Current User)
+Truy vấn thông tin định danh và tổ chức của người dùng từ phiên làm việc đã xác thực.
+
+- **Endpoint:** `GET /api/auth/me`
+- **Response Thành Công (200 OK):**
+```json
+{
+  "success": true,
+  "data": {
+    "id": "user-tp-id",
+    "email": "an.nv@vinagroup.vn",
+    "fullName": "Nguyễn Văn An",
+    "role": "USER",
+    "organizationId": "org-hq",
+    "organizationName": "Tập đoàn VinaGroup (HQ)",
+    "departmentId": "dept-it",
+    "departmentName": "Phòng Công nghệ Thông tin"
+  },
+  "timestamp": "2026-10-21T10:15:00.000Z"
+}
+```
+*Ghi chú bảo mật:* Tuyệt đối không trả về `passwordHash`, JWT secret hay token nhạy cảm.
+
+---
+
+## 5. NHỮNG GIỚI HẠN & LƯU Ý KHI GHÉP GIAO DIỆN (FRONTEND GOTCHAS)
 
 1. **Không bao giờ gửi `userId` trong Body:**
    Danh tính của người thực hiện thao tác được Backend tự động trích xuất từ Bearer JWT. Frontend không cần (và không được phép) truyền `userId` vào Body JSON.
@@ -218,3 +382,6 @@ Chủ động dừng hồ sơ không tiếp tục xử lý.
    Trong các bước song song (`ANY_CAN_APPROVE`), khi một người đồng cấp khác vừa bấm duyệt trước, người dùng bấm sau sẽ nhận mã lỗi 409. Frontend cần hiển thị thông báo thân thiện: *"Bước duyệt này đã được một người duyệt khác xử lý trước đó. Đang tải lại trạng thái hồ sơ..."* và tự động refresh dữ liệu trang.
 3. **Chữ ký cá nhân:**
    Hiện tại `signatureImageUrl` là URL ảnh (PNG/SVG nền trong suốt). Frontend có thể tích hợp canvas vẽ chữ ký tay hoặc tải ảnh lên để lấy URL trước khi gọi endpoint `POST /decision`.
+4. **Phân tách Chế độ Dữ liệu (Mock vs Real API):**
+   Frontend sử dụng kiến trúc Service Adapter `IDocumentService` với 2 implementation: `MockDocumentService` và `HttpDocumentService`. Mặc định chạy ở chế độ Mock an toàn, và chuyển sang Real API khi biến môi trường `NEXT_PUBLIC_USE_MOCK_API='false'`. Không bao giờ tự động chuyển ngầm sang mock khi API thật bị lỗi mạng hay trả về lỗi 4xx/5xx.
+

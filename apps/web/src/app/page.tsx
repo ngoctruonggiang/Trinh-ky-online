@@ -14,7 +14,7 @@ import {
   Layers,
 } from 'lucide-react';
 import { DocumentItem, DocumentStatus, UrgencyLevel } from '@/types/document';
-import { mockDocumentService } from '@/services/api/mock-document-service';
+import { documentService, isMockMode } from '@/services/api';
 import { StatusBadge, UrgencyBadge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 
@@ -41,6 +41,7 @@ function DocumentListContent() {
   const [activeTab, setActiveTab] = useState(tabParam);
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [fetchError, setFetchError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
   const [isPending, startTransition] = useTransition();
@@ -49,26 +50,25 @@ function DocumentListContent() {
     setActiveTab(tabParam);
   }, [tabParam]);
 
-  useEffect(() => {
-    let isMounted = true;
+  const loadDocuments = () => {
     setLoading(true);
+    setFetchError(null);
 
-    mockDocumentService
+    documentService
       .getDocuments(activeTab)
       .then((data) => {
-        if (isMounted) {
-          setDocuments(data);
-          setLoading(false);
-        }
+        setDocuments(data);
+        setLoading(false);
       })
       .catch((err) => {
-        console.error(err);
-        if (isMounted) setLoading(false);
+        console.error('Lỗi khi tải danh sách hồ sơ:', err);
+        setFetchError(err.message || 'Không thể tải danh sách hồ sơ từ máy chủ.');
+        setLoading(false);
       });
+  };
 
-    return () => {
-      isMounted = false;
-    };
+  useEffect(() => {
+    loadDocuments();
   }, [activeTab]);
 
   const handleTabChange = (tab: typeof activeTab) => {
@@ -95,9 +95,20 @@ function DocumentListContent() {
       {/* Page Title & Actions */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
-          <h1 className="text-xl font-bold text-slate-900 tracking-tight">
-            Quản lý Hồ sơ Trình ký
-          </h1>
+          <div className="flex items-center gap-2.5">
+            <h1 className="text-xl font-bold text-slate-900 tracking-tight">
+              Quản lý Hồ sơ Trình ký
+            </h1>
+            {isMockMode ? (
+              <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-amber-50 text-amber-700 border border-amber-200">
+                Chế độ Thử nghiệm (Mock)
+              </span>
+            ) : (
+              <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-emerald-50 text-emerald-700 border border-emerald-200">
+                API Thật (Connected)
+              </span>
+            )}
+          </div>
           <p className="text-xs text-slate-500 mt-1">
             Theo dõi, xử lý phê duyệt văn bản và lưu trữ hồ sơ điện tử của tập đoàn
           </p>
@@ -111,6 +122,20 @@ function DocumentListContent() {
           Tạo hồ sơ mới
         </Button>
       </div>
+
+      {/* Error state alert */}
+      {fetchError && (
+        <div className="p-4 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-sm flex items-center justify-between">
+          <div>
+            <span className="font-semibold">Lỗi tải dữ liệu: </span>
+            {fetchError}
+          </div>
+          <Button variant="outline" size="sm" onClick={loadDocuments}>
+            Thử lại
+          </Button>
+        </div>
+      )}
+
 
       {/* Tabs Bar */}
       <div className="flex border-b border-slate-200">
