@@ -459,4 +459,48 @@ describe('WorkflowOrchestratorService (Điều phối Transaction, Concurrency &
       })
     ).rejects.toThrow('Lỗi kết nối cơ sở dữ liệu khi ghi AuditLog');
   });
+
+  it('10. cancelDocument: Hủy hồ sơ khi đang REVISION_REQUESTED đóng toàn bộ các bước còn lại', async () => {
+    const docData = createMockDocumentData();
+    docData.status = DocumentStatus.REVISION_REQUESTED;
+    docData.workflow.steps[0].status = StepStatus.REVISION_REQUESTED;
+    mockPrisma.document.findUnique.mockResolvedValue(docData);
+
+    const res = await orchestrator.cancelDocument({
+      documentId: 'doc-123',
+      userId: 'creator-user',
+      cancelReason: 'Hủy sau khi có yêu cầu sửa',
+    });
+
+    expect(res.success).toBe(true);
+    expect(res.documentStatus).toBe(DocumentStatus.CANCELLED);
+    expect(res.workflowStatus).toBe(WorkflowStatus.CANCELLED);
+
+    expect(mockPrisma.approvalStep.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          status: { in: [StepStatus.IN_PROGRESS, StepStatus.WAITING, StepStatus.REVISION_REQUESTED] },
+        }),
+        data: expect.objectContaining({
+          status: StepStatus.CANCELLED,
+        }),
+      })
+    );
+  });
+
+  it('11. cancelDocument: Hủy hồ sơ từ DRAFT thành công và ghi AuditLog', async () => {
+    const docData = createMockDocumentData();
+    docData.status = DocumentStatus.DRAFT;
+    docData.workflow.status = WorkflowStatus.PENDING;
+    mockPrisma.document.findUnique.mockResolvedValue(docData);
+
+    const res = await orchestrator.cancelDocument({
+      documentId: 'doc-123',
+      userId: 'creator-user',
+      cancelReason: 'Hủy bản nháp không dùng',
+    });
+
+    expect(res.success).toBe(true);
+    expect(res.documentStatus).toBe(DocumentStatus.CANCELLED);
+  });
 });

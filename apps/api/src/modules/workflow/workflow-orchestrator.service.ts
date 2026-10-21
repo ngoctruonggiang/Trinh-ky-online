@@ -744,11 +744,11 @@ export class WorkflowOrchestratorService {
         },
       });
 
-      // Đóng toàn bộ các bước chưa hoàn tất
+      // Đóng toàn bộ các bước chưa hoàn tất (bao gồm cả REVISION_REQUESTED)
       await tx.approvalStep.updateMany({
         where: {
           workflowId: document.workflow.id,
-          status: { in: [StepStatus.IN_PROGRESS, StepStatus.WAITING] },
+          status: { in: [StepStatus.IN_PROGRESS, StepStatus.WAITING, StepStatus.REVISION_REQUESTED] },
         },
         data: {
           status: StepStatus.CANCELLED,

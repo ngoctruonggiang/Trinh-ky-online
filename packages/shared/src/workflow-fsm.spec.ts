@@ -422,5 +422,44 @@ describe('WorkflowFSM (Lõi máy trạng thái quy trình duyệt)', () => {
     expect(resRejected.success).toBe(false);
     expect(resRejected.error).toContain('Không thể hủy hồ sơ đã bị từ chối');
   });
+
+  it('15. cancelWorkflow: Hủy hồ sơ khi đang REVISION_REQUESTED chuyển bước thành CANCELLED', () => {
+    const wf = createMockWorkflow();
+    wf.steps[0].status = StepStatus.REVISION_REQUESTED;
+    wf.steps[1].status = StepStatus.WAITING;
+
+    const res = WorkflowFSM.cancelWorkflow({
+      workflow: wf,
+      documentStatus: DocumentStatus.REVISION_REQUESTED,
+      cancelledById: 'creator-user',
+      cancelReason: 'Không tiếp tục đề xuất sau khi được yêu cầu sửa',
+    });
+
+    expect(res.success).toBe(true);
+    expect(res.newDocumentStatus).toBe(DocumentStatus.CANCELLED);
+    expect(res.newWorkflowStatus).toBe(WorkflowStatus.CANCELLED);
+    expect(res.updatedWorkflow.steps[0].status).toBe(StepStatus.CANCELLED);
+    expect(res.updatedWorkflow.steps[1].status).toBe(StepStatus.CANCELLED);
+  });
+
+  it('16. cancelWorkflow: Cho phép hủy hồ sơ ở trạng thái DRAFT', () => {
+    const wf = createMockWorkflow();
+    wf.status = WorkflowStatus.PENDING;
+    wf.steps[0].status = StepStatus.WAITING;
+    wf.steps[1].status = StepStatus.WAITING;
+
+    const res = WorkflowFSM.cancelWorkflow({
+      workflow: wf,
+      documentStatus: DocumentStatus.DRAFT,
+      cancelledById: 'creator-user',
+      cancelReason: 'Tạo nhầm form nháp',
+    });
+
+    expect(res.success).toBe(true);
+    expect(res.newDocumentStatus).toBe(DocumentStatus.CANCELLED);
+    expect(res.newWorkflowStatus).toBe(WorkflowStatus.CANCELLED);
+    expect(res.updatedWorkflow.steps[0].status).toBe(StepStatus.CANCELLED);
+  });
 });
+
 

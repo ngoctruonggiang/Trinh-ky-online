@@ -497,9 +497,13 @@ export class WorkflowFSM {
       };
     }
 
-    // Đóng toàn bộ các bước đang chạy hoặc đang chờ
+    // Đóng toàn bộ các bước đang chạy, đang chờ hoặc đang yêu cầu sửa
     updatedWorkflow.steps.forEach((s) => {
-      if (s.status === StepStatus.IN_PROGRESS || s.status === StepStatus.WAITING) {
+      if (
+        s.status === StepStatus.IN_PROGRESS ||
+        s.status === StepStatus.WAITING ||
+        s.status === StepStatus.REVISION_REQUESTED
+      ) {
         s.status = StepStatus.CANCELLED;
         s.completedAt = nowISO;
       }

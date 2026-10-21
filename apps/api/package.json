@@ -5,7 +5,8 @@
   "scripts": {
     "build": "nest build",
     "dev": "nest start --watch",
-    "test": "vitest run",
+    "test": "vitest run --exclude \"**/*.integration.spec.ts\"",
+    "test:integration": "vitest run test/workflow-postgresql.integration.spec.ts",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev"
   },
