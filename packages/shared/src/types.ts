@@ -29,6 +29,7 @@ export interface WorkflowStep {
   stepType: StepType;
   completionRule: StepCompletionRule;
   status: StepStatus;
+  version?: number; // Hỗ trợ optimistic concurrency
   assignees: WorkflowAssignee[];
   startedAt?: string;
   completedAt?: string;
@@ -39,6 +40,7 @@ export interface WorkflowInstance {
   documentId: string;
   status: WorkflowStatus;
   currentStepOrder: number;
+  version?: number; // Hỗ trợ optimistic concurrency
   steps: WorkflowStep[];
   startedAt?: string;
   completedAt?: string;
@@ -68,3 +70,36 @@ export interface FSMTransitionResult {
   shouldNotifyUserIds: string[];
   invalidatedSignatures?: SignatureRecord[];
 }
+
+export interface ProcessDecisionParams {
+  workflow: WorkflowInstance;
+  documentStatus?: DocumentStatus;
+  userId: string;
+  decision: AssigneeDecision;
+  decisionComment?: string;
+  existingSignatures?: SignatureRecord[];
+  nowISO?: string;
+}
+
+export interface StartWorkflowParams {
+  workflow: WorkflowInstance;
+  documentStatus?: DocumentStatus;
+  nowISO?: string;
+}
+
+export interface ResubmitWorkflowParams {
+  workflow: WorkflowInstance;
+  documentStatus: DocumentStatus;
+  resubmittedById: string;
+  changeSummary?: string;
+  nowISO?: string;
+}
+
+export interface CancelWorkflowParams {
+  workflow: WorkflowInstance;
+  documentStatus: DocumentStatus;
+  cancelledById: string;
+  cancelReason?: string;
+  nowISO?: string;
+}
+

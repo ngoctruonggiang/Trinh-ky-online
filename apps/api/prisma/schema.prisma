@@ -73,6 +73,7 @@ model User {
   signatures        SignatureEvent[]
   comments          DocumentComment[]
   auditLogs         AuditLog[]
+  decisionHistories StepDecisionHistory[]
 
   @@map("users")
 }
@@ -185,6 +186,7 @@ model DocumentVersion {
 
   document       Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
   signatures     SignatureEvent[]
+  decisionHistories StepDecisionHistory[]
 
   @@unique([documentId, versionNumber])
   @@map("document_versions")
@@ -254,6 +256,7 @@ model ApprovalWorkflow {
   documentId       String         @unique
   status           WorkflowStatus @default(PENDING)
   currentStepOrder Int            @default(1)
+  version          Int            @default(0) // Optimistic locking
   startedAt        DateTime?
   completedAt      DateTime?
   createdAt        DateTime       @default(now())
@@ -273,6 +276,7 @@ model ApprovalStep {
   stepType       StepType           @default(SEQUENTIAL)
   completionRule StepCompletionRule @default(ALL_MUST_APPROVE)
   status         StepStatus         @default(WAITING)
+  version        Int                @default(0) // Optimistic locking
   startedAt      DateTime?
   completedAt    DateTime?
   createdAt      DateTime           @default(now())
@@ -282,6 +286,7 @@ model ApprovalStep {
   assignees      StepAssignee[]
   signatures     SignatureEvent[]
   comments       DocumentComment[]
+  decisionHistories StepDecisionHistory[]
 
   @@unique([workflowId, stepOrder])
   @@map("approval_steps")
@@ -303,6 +308,25 @@ model StepAssignee {
 
   @@unique([stepId, userId])
   @@map("step_assignees")
+}
+
+model StepDecisionHistory {
+  id                String           @id @default(uuid())
+  stepId            String
+  documentVersionId String
+  userId            String
+  role              AssigneeRole
+  decision          AssigneeDecision
+  decisionComment   String?
+  decidedAt         DateTime         @default(now())
+
+  step              ApprovalStep     @relation(fields: [stepId], references: [id], onDelete: Cascade)
+  documentVersion   DocumentVersion  @relation(fields: [documentVersionId], references: [id], onDelete: Cascade)
+  user              User             @relation(fields: [userId], references: [id])
+
+  @@index([stepId])
+  @@index([documentVersionId])
+  @@map("step_decision_histories")
 }
 
 // -------------------------------------------------------------

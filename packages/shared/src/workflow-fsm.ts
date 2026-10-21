@@ -8,8 +8,12 @@ import {
   WorkflowStatus,
 } from './enums.js';
 import {
+  CancelWorkflowParams,
   FSMTransitionResult,
+  ProcessDecisionParams,
+  ResubmitWorkflowParams,
   SignatureRecord,
+  StartWorkflowParams,
   WorkflowAssignee,
   WorkflowInstance,
   WorkflowStep,
@@ -39,16 +43,10 @@ export class WorkflowFSM {
   /**
    * Xử lý quyết định của một Assignee trong bước hiện tại
    */
-  public static processDecision(params: {
-    workflow: WorkflowInstance;
-    userId: string;
-    decision: AssigneeDecision;
-    decisionComment?: string;
-    existingSignatures?: SignatureRecord[];
-    nowISO?: string;
-  }): FSMTransitionResult {
+  public static processDecision(params: ProcessDecisionParams): FSMTransitionResult {
     const {
       workflow,
+      documentStatus,
       userId,
       decision,
       decisionComment,
@@ -58,6 +56,60 @@ export class WorkflowFSM {
 
     // Clone workflow để đảm bảo tính bất biến (immutability) trong tính toán FSM
     const updatedWorkflow: WorkflowInstance = JSON.parse(JSON.stringify(workflow));
+
+    // 1. Kiểm tra tính hợp lệ của trạng thái hồ sơ (Document Status Guard)
+    if (documentStatus) {
+      if (documentStatus === DocumentStatus.REJECTED) {
+        return {
+          success: false,
+          error: 'Không thể thực hiện phê duyệt trên tài liệu đã bị từ chối (REJECTED).',
+          newDocumentStatus: DocumentStatus.REJECTED,
+          newWorkflowStatus: updatedWorkflow.status,
+          updatedWorkflow,
+          shouldNotifyUserIds: [],
+        };
+      }
+      if (documentStatus === DocumentStatus.CANCELLED) {
+        return {
+          success: false,
+          error: 'Không thể thực hiện phê duyệt trên tài liệu đã bị hủy (CANCELLED).',
+          newDocumentStatus: DocumentStatus.CANCELLED,
+          newWorkflowStatus: updatedWorkflow.status,
+          updatedWorkflow,
+          shouldNotifyUserIds: [],
+        };
+      }
+      if (documentStatus === DocumentStatus.APPROVED) {
+        return {
+          success: false,
+          error: 'Tài liệu đã được phê duyệt hoàn tất (APPROVED).',
+          newDocumentStatus: DocumentStatus.APPROVED,
+          newWorkflowStatus: updatedWorkflow.status,
+          updatedWorkflow,
+          shouldNotifyUserIds: [],
+        };
+      }
+      if (documentStatus === DocumentStatus.REVISION_REQUESTED) {
+        return {
+          success: false,
+          error: 'Tài liệu đang trong trạng thái yêu cầu chỉnh sửa (REVISION_REQUESTED), không thể thực hiện phê duyệt.',
+          newDocumentStatus: DocumentStatus.REVISION_REQUESTED,
+          newWorkflowStatus: updatedWorkflow.status,
+          updatedWorkflow,
+          shouldNotifyUserIds: [],
+        };
+      }
+      if (documentStatus === DocumentStatus.DRAFT) {
+        return {
+          success: false,
+          error: 'Tài liệu chưa được gửi trình duyệt (DRAFT).',
+          newDocumentStatus: DocumentStatus.DRAFT,
+          newWorkflowStatus: updatedWorkflow.status,
+          updatedWorkflow,
+          shouldNotifyUserIds: [],
+        };
+      }
+    }
 
     const currentStep = updatedWorkflow.steps.find(
       (s) => s.stepOrder === updatedWorkflow.currentStepOrder
@@ -77,7 +129,7 @@ export class WorkflowFSM {
     if (currentStep.status !== StepStatus.IN_PROGRESS) {
       return {
         success: false,
-        error: `Bước duyệt "${currentStep.stepName}" không ở trạng thái đang xử lý (IN_PROGRESS)`,
+        error: `Bước duyệt "${currentStep.stepName}" không ở trạng thái đang xử lý (IN_PROGRESS). Trạng thái hiện tại: ${currentStep.status}`,
         newDocumentStatus: DocumentStatus.IN_REVIEW,
         newWorkflowStatus: updatedWorkflow.status,
         updatedWorkflow,
@@ -251,10 +303,35 @@ export class WorkflowFSM {
    * Khởi tạo quy trình duyệt khi người dùng gửi hồ sơ (SUBMIT)
    */
   public static startWorkflow(
-    workflow: WorkflowInstance,
-    nowISO = new Date().toISOString()
+    workflowOrParams: WorkflowInstance | StartWorkflowParams,
+    nowISOFallback = new Date().toISOString()
   ): FSMTransitionResult {
+    let workflow: WorkflowInstance;
+    let documentStatus: DocumentStatus | undefined;
+    let nowISO: string;
+
+    if ('workflow' in workflowOrParams) {
+      workflow = workflowOrParams.workflow;
+      documentStatus = workflowOrParams.documentStatus;
+      nowISO = workflowOrParams.nowISO || new Date().toISOString();
+    } else {
+      workflow = workflowOrParams;
+      nowISO = nowISOFallback;
+    }
+
     const updatedWorkflow: WorkflowInstance = JSON.parse(JSON.stringify(workflow));
+
+    // Guard: Chỉ cho phép submit khi document đang là DRAFT
+    if (documentStatus && documentStatus !== DocumentStatus.DRAFT) {
+      return {
+        success: false,
+        error: `Chỉ có thể gửi duyệt tài liệu ở trạng thái bản nháp (DRAFT). Trạng thái hiện tại: ${documentStatus}`,
+        newDocumentStatus: documentStatus,
+        newWorkflowStatus: updatedWorkflow.status,
+        updatedWorkflow,
+        shouldNotifyUserIds: [],
+      };
+    }
 
     if (updatedWorkflow.steps.length === 0) {
       return {
@@ -291,4 +368,153 @@ export class WorkflowFSM {
       shouldNotifyUserIds: firstStep.assignees.map((a) => a.userId),
     };
   }
+
+  /**
+   * Nộp lại hồ sơ sau khi chỉnh sửa (Resubmit sau REVISION_REQUESTED)
+   * Quy chuẩn mặc định: Chạy lại từ Bước 1, không tự động mang theo phê duyệt cũ.
+   */
+  public static resubmitWorkflow(params: ResubmitWorkflowParams): FSMTransitionResult {
+    const {
+      workflow,
+      documentStatus,
+      resubmittedById,
+      changeSummary,
+      nowISO = new Date().toISOString(),
+    } = params;
+
+    const updatedWorkflow: WorkflowInstance = JSON.parse(JSON.stringify(workflow));
+
+    // Guard: Chỉ được resubmit khi hồ sơ đang ở trạng thái REVISION_REQUESTED
+    if (documentStatus !== DocumentStatus.REVISION_REQUESTED) {
+      return {
+        success: false,
+        error: `Chỉ có thể nộp lại hồ sơ đang ở trạng thái Yêu cầu chỉnh sửa (REVISION_REQUESTED). Trạng thái hiện tại: ${documentStatus}`,
+        newDocumentStatus: documentStatus,
+        newWorkflowStatus: updatedWorkflow.status,
+        updatedWorkflow,
+        shouldNotifyUserIds: [],
+      };
+    }
+
+    if (updatedWorkflow.steps.length === 0) {
+      return {
+        success: false,
+        error: 'Quy trình không có bất kỳ bước duyệt nào để nộp lại.',
+        newDocumentStatus: documentStatus,
+        newWorkflowStatus: updatedWorkflow.status,
+        updatedWorkflow,
+        shouldNotifyUserIds: [],
+      };
+    }
+
+    // Sắp xếp lại các bước duyệt
+    const sortedSteps = updatedWorkflow.steps.sort((a, b) => a.stepOrder - b.stepOrder);
+
+    // Bước 1: Kích hoạt lại trạng thái IN_PROGRESS và reset các quyết định của người duyệt
+    const firstStep = sortedSteps[0];
+    firstStep.status = StepStatus.IN_PROGRESS;
+    firstStep.startedAt = nowISO;
+    firstStep.completedAt = undefined;
+    firstStep.assignees.forEach((a) => {
+      a.decision = AssigneeDecision.PENDING;
+      a.decisionComment = undefined;
+      a.decidedAt = undefined;
+    });
+
+    // Các bước tiếp theo: Chuyển về WAITING và reset quyết định
+    sortedSteps.slice(1).forEach((s) => {
+      s.status = StepStatus.WAITING;
+      s.startedAt = undefined;
+      s.completedAt = undefined;
+      s.assignees.forEach((a) => {
+        a.decision = AssigneeDecision.PENDING;
+        a.decisionComment = undefined;
+        a.decidedAt = undefined;
+      });
+    });
+
+    updatedWorkflow.currentStepOrder = firstStep.stepOrder;
+    updatedWorkflow.status = WorkflowStatus.RUNNING;
+    updatedWorkflow.startedAt = nowISO;
+    updatedWorkflow.completedAt = undefined;
+
+    return {
+      success: true,
+      newDocumentStatus: DocumentStatus.IN_REVIEW,
+      newWorkflowStatus: WorkflowStatus.RUNNING,
+      updatedWorkflow,
+      shouldNotifyUserIds: firstStep.assignees.map((a) => a.userId),
+    };
+  }
+
+  /**
+   * Hủy hồ sơ trình ký (Cancel)
+   * Cho phép hủy khi hồ sơ ở các trạng thái: DRAFT, SUBMITTED, IN_REVIEW, REVISION_REQUESTED.
+   * Chặn tuyệt đối hủy hồ sơ đã APPROVED hoặc REJECTED.
+   */
+  public static cancelWorkflow(params: CancelWorkflowParams): FSMTransitionResult {
+    const {
+      workflow,
+      documentStatus,
+      cancelledById,
+      cancelReason,
+      nowISO = new Date().toISOString(),
+    } = params;
+
+    const updatedWorkflow: WorkflowInstance = JSON.parse(JSON.stringify(workflow));
+
+    // Guard: Chặn hủy hồ sơ đã hoàn tất hoặc đã bị từ chối
+    if (documentStatus === DocumentStatus.APPROVED) {
+      return {
+        success: false,
+        error: 'Không thể hủy hồ sơ đã được phê duyệt hoàn tất (APPROVED).',
+        newDocumentStatus: DocumentStatus.APPROVED,
+        newWorkflowStatus: updatedWorkflow.status,
+        updatedWorkflow,
+        shouldNotifyUserIds: [],
+      };
+    }
+
+    if (documentStatus === DocumentStatus.REJECTED) {
+      return {
+        success: false,
+        error: 'Không thể hủy hồ sơ đã bị từ chối phê duyệt (REJECTED).',
+        newDocumentStatus: DocumentStatus.REJECTED,
+        newWorkflowStatus: updatedWorkflow.status,
+        updatedWorkflow,
+        shouldNotifyUserIds: [],
+      };
+    }
+
+    if (documentStatus === DocumentStatus.CANCELLED) {
+      return {
+        success: false,
+        error: 'Hồ sơ đã ở trạng thái bị hủy trước đó (CANCELLED).',
+        newDocumentStatus: DocumentStatus.CANCELLED,
+        newWorkflowStatus: WorkflowStatus.CANCELLED,
+        updatedWorkflow,
+        shouldNotifyUserIds: [],
+      };
+    }
+
+    // Đóng toàn bộ các bước đang chạy hoặc đang chờ
+    updatedWorkflow.steps.forEach((s) => {
+      if (s.status === StepStatus.IN_PROGRESS || s.status === StepStatus.WAITING) {
+        s.status = StepStatus.CANCELLED;
+        s.completedAt = nowISO;
+      }
+    });
+
+    updatedWorkflow.status = WorkflowStatus.CANCELLED;
+    updatedWorkflow.completedAt = nowISO;
+
+    return {
+      success: true,
+      newDocumentStatus: DocumentStatus.CANCELLED,
+      newWorkflowStatus: WorkflowStatus.CANCELLED,
+      updatedWorkflow,
+      shouldNotifyUserIds: [],
+    };
+  }
 }
+

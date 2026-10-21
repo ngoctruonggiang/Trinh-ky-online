@@ -253,4 +253,174 @@ describe('WorkflowFSM (Lõi máy trạng thái quy trình duyệt)', () => {
     expect(res.success).toBe(false);
     expect(res.error).toContain('Người giám sát (REVIEWER) chỉ có quyền xem');
   });
+
+  it('7. startWorkflow: Gửi hồ sơ hợp lệ từ DRAFT -> chuyển IN_REVIEW, Step 1 thành IN_PROGRESS', () => {
+    const wf = createMockWorkflow();
+    wf.status = WorkflowStatus.PENDING;
+    wf.steps[0].status = StepStatus.WAITING;
+
+    const res = WorkflowFSM.startWorkflow({
+      workflow: wf,
+      documentStatus: DocumentStatus.DRAFT,
+    });
+
+    expect(res.success).toBe(true);
+    expect(res.newDocumentStatus).toBe(DocumentStatus.IN_REVIEW);
+    expect(res.newWorkflowStatus).toBe(WorkflowStatus.RUNNING);
+    expect(res.updatedWorkflow.steps[0].status).toBe(StepStatus.IN_PROGRESS);
+    expect(res.shouldNotifyUserIds).toContain('user-tp');
+  });
+
+  it('8. startWorkflow: Chặn gửi duyệt khi thiếu bước duyệt hoặc tài liệu không phải DRAFT', () => {
+    const emptyWf = createMockWorkflow();
+    emptyWf.steps = [];
+
+    const res1 = WorkflowFSM.startWorkflow({
+      workflow: emptyWf,
+      documentStatus: DocumentStatus.DRAFT,
+    });
+    expect(res1.success).toBe(false);
+    expect(res1.error).toContain('Quy trình không có bất kỳ bước duyệt nào');
+
+    const wf = createMockWorkflow();
+    const res2 = WorkflowFSM.startWorkflow({
+      workflow: wf,
+      documentStatus: DocumentStatus.APPROVED,
+    });
+    expect(res2.success).toBe(false);
+    expect(res2.error).toContain('Chỉ có thể gửi duyệt tài liệu ở trạng thái bản nháp');
+  });
+
+  it('9. Một Assignee không thể quyết định hai lần (Chống double-decision)', () => {
+    const wf = createMockWorkflow();
+
+    // Lần 1: Duyệt thành công
+    const res1 = WorkflowFSM.processDecision({
+      workflow: wf,
+      userId: 'user-tp',
+      decision: AssigneeDecision.APPROVED,
+    });
+    expect(res1.success).toBe(true);
+
+    // Lần 2: Cố tình gọi lại quyết định trên cùng assignee
+    const res2 = WorkflowFSM.processDecision({
+      workflow: res1.updatedWorkflow,
+      userId: 'user-tp',
+      decision: AssigneeDecision.APPROVED,
+    });
+    expect(res2.success).toBe(false);
+  });
+
+  it('10. Chặn phê duyệt hồ sơ đã ở trạng thái REJECTED, CANCELLED hoặc APPROVED', () => {
+    const wf = createMockWorkflow();
+
+    const resReject = WorkflowFSM.processDecision({
+      workflow: wf,
+      documentStatus: DocumentStatus.REJECTED,
+      userId: 'user-tp',
+      decision: AssigneeDecision.APPROVED,
+    });
+    expect(resReject.success).toBe(false);
+    expect(resReject.error).toContain('Không thể thực hiện phê duyệt trên tài liệu đã bị từ chối');
+
+    const resCancel = WorkflowFSM.processDecision({
+      workflow: wf,
+      documentStatus: DocumentStatus.CANCELLED,
+      userId: 'user-tp',
+      decision: AssigneeDecision.APPROVED,
+    });
+    expect(resCancel.success).toBe(false);
+    expect(resCancel.error).toContain('Không thể thực hiện phê duyệt trên tài liệu đã bị hủy');
+
+    const resApproved = WorkflowFSM.processDecision({
+      workflow: wf,
+      documentStatus: DocumentStatus.APPROVED,
+      userId: 'user-tp',
+      decision: AssigneeDecision.APPROVED,
+    });
+    expect(resApproved.success).toBe(false);
+    expect(resApproved.error).toContain('Tài liệu đã được phê duyệt hoàn tất');
+  });
+
+  it('11. resubmitWorkflow: Tái khởi động quy trình từ Bước 1, reset quyết định người duyệt', () => {
+    const wf = createMockWorkflow();
+    // Giả sử bước 1 đã COMPLETED, bước 2 yêu cầu sửa
+    wf.steps[0].status = StepStatus.COMPLETED;
+    wf.steps[0].assignees[0].decision = AssigneeDecision.APPROVED;
+    wf.steps[1].status = StepStatus.REVISION_REQUESTED;
+    wf.steps[1].assignees[0].decision = AssigneeDecision.REVISION_REQUESTED;
+    wf.currentStepOrder = 2;
+
+    const res = WorkflowFSM.resubmitWorkflow({
+      workflow: wf,
+      documentStatus: DocumentStatus.REVISION_REQUESTED,
+      resubmittedById: 'author-1',
+      changeSummary: 'Cập nhật lại số tiền theo yêu cầu',
+    });
+
+    expect(res.success).toBe(true);
+    expect(res.newDocumentStatus).toBe(DocumentStatus.IN_REVIEW);
+    expect(res.newWorkflowStatus).toBe(WorkflowStatus.RUNNING);
+    expect(res.updatedWorkflow.currentStepOrder).toBe(1);
+
+    // Bước 1 phải được kích hoạt lại IN_PROGRESS, assignees reset về PENDING
+    expect(res.updatedWorkflow.steps[0].status).toBe(StepStatus.IN_PROGRESS);
+    expect(res.updatedWorkflow.steps[0].assignees[0].decision).toBe(AssigneeDecision.PENDING);
+
+    // Bước 2 phải chuyển về WAITING, assignees reset về PENDING
+    expect(res.updatedWorkflow.steps[1].status).toBe(StepStatus.WAITING);
+    expect(res.updatedWorkflow.steps[1].assignees[0].decision).toBe(AssigneeDecision.PENDING);
+    expect(res.shouldNotifyUserIds).toContain('user-tp');
+  });
+
+  it('12. resubmitWorkflow: Chặn nộp lại nếu hồ sơ không ở trạng thái REVISION_REQUESTED', () => {
+    const wf = createMockWorkflow();
+
+    const res = WorkflowFSM.resubmitWorkflow({
+      workflow: wf,
+      documentStatus: DocumentStatus.IN_REVIEW, // Không hợp lệ
+      resubmittedById: 'author-1',
+    });
+
+    expect(res.success).toBe(false);
+    expect(res.error).toContain('Chỉ có thể nộp lại hồ sơ đang ở trạng thái Yêu cầu chỉnh sửa');
+  });
+
+  it('13. cancelWorkflow: Hủy hồ sơ hợp lệ từ IN_REVIEW, đóng các bước còn lại', () => {
+    const wf = createMockWorkflow();
+
+    const res = WorkflowFSM.cancelWorkflow({
+      workflow: wf,
+      documentStatus: DocumentStatus.IN_REVIEW,
+      cancelledById: 'creator-user',
+      cancelReason: 'Thay đổi kế hoạch công tác',
+    });
+
+    expect(res.success).toBe(true);
+    expect(res.newDocumentStatus).toBe(DocumentStatus.CANCELLED);
+    expect(res.newWorkflowStatus).toBe(WorkflowStatus.CANCELLED);
+    expect(res.updatedWorkflow.steps[0].status).toBe(StepStatus.CANCELLED);
+    expect(res.updatedWorkflow.steps[1].status).toBe(StepStatus.CANCELLED);
+  });
+
+  it('14. cancelWorkflow: Chặn hủy hồ sơ đã APPROVED hoặc REJECTED', () => {
+    const wf = createMockWorkflow();
+
+    const resApproved = WorkflowFSM.cancelWorkflow({
+      workflow: wf,
+      documentStatus: DocumentStatus.APPROVED,
+      cancelledById: 'creator-user',
+    });
+    expect(resApproved.success).toBe(false);
+    expect(resApproved.error).toContain('Không thể hủy hồ sơ đã được phê duyệt hoàn tất');
+
+    const resRejected = WorkflowFSM.cancelWorkflow({
+      workflow: wf,
+      documentStatus: DocumentStatus.REJECTED,
+      cancelledById: 'creator-user',
+    });
+    expect(resRejected.success).toBe(false);
+    expect(resRejected.error).toContain('Không thể hủy hồ sơ đã bị từ chối');
+  });
 });
+
