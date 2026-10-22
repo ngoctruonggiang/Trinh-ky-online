@@ -5,6 +5,7 @@ import {
   FormFieldDefinition,
   FormTemplate,
   normalizeFieldOptions,
+  canonicalizeJson,
 } from './template-schema.js';
 
 describe('Template Schema & Form Validation (Phase 10 Shared Engine)', () => {
@@ -270,6 +271,61 @@ describe('Template Schema & Form Validation (Phase 10 Shared Engine)', () => {
       expect(res.valid).toBe(false);
       expect(res.errors['ho_ten']).toContain('độ dài tối thiểu 3 ký tự');
     });
+
+    it('Chặn key không được khai báo trong schema (Undeclared Key Policy)', () => {
+      const payloadWithInjectedKey = {
+        ho_ten: 'Nguyễn Văn An',
+        email: 'an.nguyen@vinagroup.vn',
+        so_tien: 5000000,
+        ngay_di: '2026-11-01',
+        muc_dich: 'CONG_TAC',
+        injected_malicious_key: 'malicious_value',
+      };
+      const res = validateFormData(testFields, payloadWithInjectedKey);
+      expect(res.valid).toBe(false);
+      expect(res.errors['injected_malicious_key']).toContain('không được định nghĩa');
+    });
+
+    it('Bắt lỗi number không hữu hạn (Infinity, -Infinity)', () => {
+      const infiniteData = {
+        ho_ten: 'Nguyễn Văn An',
+        email: 'an.nguyen@vinagroup.vn',
+        so_tien: Infinity,
+        ngay_di: '2026-11-01',
+        muc_dich: 'CONG_TAC',
+      };
+      const res = validateFormData(testFields, infiniteData);
+      expect(res.valid).toBe(false);
+      expect(res.errors['so_tien']).toContain('chữ số hữu hạn');
+    });
+
+    it('Bắt lỗi ngày không tồn tại trong lịch thực tế (2026-02-31)', () => {
+      const invalidCalendarDate = {
+        ho_ten: 'Nguyễn Văn An',
+        email: 'an.nguyen@vinagroup.vn',
+        so_tien: 5000000,
+        ngay_di: '2026-02-31',
+        muc_dich: 'CONG_TAC',
+      };
+      const res = validateFormData(testFields, invalidCalendarDate);
+      expect(res.valid).toBe(false);
+      expect(res.errors['ngay_di']).toContain('không tồn tại trong lịch');
+    });
+
+    it('Bắt lỗi currency_vnd nếu chứa số thập phân hoặc âm không hợp lệ', () => {
+      const vndFields: FormFieldDefinition[] = [
+        { id: '1', key: 'chi_phi', label: 'Chi phí', type: 'currency_vnd', required: true, order: 1 },
+      ];
+      // Số thập phân
+      const floatRes = validateFormData(vndFields, { chi_phi: 150000.5 });
+      expect(floatRes.valid).toBe(false);
+      expect(floatRes.errors['chi_phi']).toContain('không chứa số thập phân');
+
+      // Số âm
+      const negRes = validateFormData(vndFields, { chi_phi: -50000 });
+      expect(negRes.valid).toBe(false);
+      expect(negRes.errors['chi_phi']).toContain('không được là số tiền âm');
+    });
   });
 
   describe('3. normalizeFieldOptions (Chuẩn hóa Options)', () => {
@@ -287,6 +343,65 @@ describe('Template Schema & Form Validation (Phase 10 Shared Engine)', () => {
       const raw = [{ label: 'Phòng IT', value: 'IT' }];
       const normalized = normalizeFieldOptions(raw);
       expect(normalized).toEqual([{ label: 'Phòng IT', value: 'IT' }]);
+    });
+  });
+
+  describe('4. canonicalizeJson (Chuẩn hóa JSON cho băm toàn vẹn SHA-256)', () => {
+    it('Sắp xếp key đệ quy đồng nhất dù thứ tự khởi tạo khác nhau', () => {
+      const objA = { b: 2, a: 1, nested: { z: 10, y: 20 } };
+      const objB = { a: 1, nested: { y: 20, z: 10 }, b: 2 };
+
+      expect(canonicalizeJson(objA)).toBe(canonicalizeJson(objB));
+      expect(canonicalizeJson(objA)).toBe('{"a":1,"b":2,"nested":{"y":20,"z":10}}');
+    });
+  });
+
+  describe('5. ReDoS Protection trong validateTemplateSchema', () => {
+    it('Chặn biểu thức chính quy có nguy cơ ReDoS (nested quantifiers)', () => {
+      const redosTemplate: FormTemplate = {
+        code: 'TPL_REDOS',
+        title: 'Mẫu kiểm tra ReDoS',
+        status: 'DRAFT',
+        fields: [
+          {
+            id: '1',
+            key: 'risky_field',
+            label: 'Trường rủi ro',
+            type: 'text',
+            required: false,
+            order: 1,
+            validation: { pattern: '([a-zA-Z]+)*' },
+          },
+        ],
+        layoutBlocks: [],
+      };
+      const res = validateTemplateSchema(redosTemplate);
+      expect(res.valid).toBe(false);
+      expect(res.errors.some((e) => e.includes('ReDoS'))).toBe(true);
+    });
+
+    it('Chặn biểu thức chính quy quá 200 ký tự', () => {
+      const longPattern = 'a'.repeat(250);
+      const longPatternTemplate: FormTemplate = {
+        code: 'TPL_LONG_REGEX',
+        title: 'Mẫu regex dài',
+        status: 'DRAFT',
+        fields: [
+          {
+            id: '1',
+            key: 'long_field',
+            label: 'Trường regex dài',
+            type: 'text',
+            required: false,
+            order: 1,
+            validation: { pattern: longPattern },
+          },
+        ],
+        layoutBlocks: [],
+      };
+      const res = validateTemplateSchema(longPatternTemplate);
+      expect(res.valid).toBe(false);
+      expect(res.errors.some((e) => e.includes('quá dài'))).toBe(true);
     });
   });
 });

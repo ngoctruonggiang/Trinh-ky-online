@@ -4,6 +4,7 @@ import {
   CreateTemplatePayload,
   UpdateTemplatePayload,
   PublishTemplatePayload,
+  DraftVersionDetail,
 } from '@/types/template';
 import { ITemplateService, GetTemplatesQuery } from './template-service.interface';
 import { validateFormData, validateTemplateSchema, FormFieldDefinition } from '@trinh-ky/shared';
@@ -364,7 +365,21 @@ export class MockTemplateService implements ITemplateService {
     }
 
     let nextVer = 1;
-    if (template.status === 'PUBLISHED') {
+    let publishedFields = template.fields;
+    let publishedTitle = template.title;
+    let publishedBlocks = template.layoutBlocks;
+
+    if (template.draftVersion) {
+      nextVer = template.draftVersion.versionNumber;
+      publishedFields = template.draftVersion.fields;
+      publishedTitle = template.draftVersion.title;
+      publishedBlocks = template.draftVersion.layoutBlocks || [];
+      template.fields = publishedFields;
+      template.title = publishedTitle;
+      template.layoutBlocks = publishedBlocks;
+      template.hasDraft = false;
+      template.draftVersion = null;
+    } else if (template.status === 'PUBLISHED') {
       nextVer = template.currentVersion + 1;
     }
 
@@ -376,12 +391,12 @@ export class MockTemplateService implements ITemplateService {
     template.versions.unshift({
       id: verId,
       versionNumber: nextVer,
-      title: template.title,
+      title: publishedTitle,
       changeSummary: payload?.changeSummary || `Phiên bản v${nextVer}`,
       status: 'PUBLISHED',
       createdByName: 'Admin',
       createdAt: new Date().toISOString(),
-      fieldCount: template.fields.length,
+      fieldCount: publishedFields.length,
     });
 
     return { id: template.id, versionNumber: nextVer, versionId: verId };
@@ -403,5 +418,131 @@ export class MockTemplateService implements ITemplateService {
   ): Promise<{ valid: boolean; errors: Record<string, string> }> {
     const template = await this.getTemplateById(templateId);
     return validateFormData(template.fields, formData);
+  }
+
+  public async createDraftVersion(
+    templateId: string
+  ): Promise<{ id: string; versionNumber: number; title: string; status: string }> {
+    const template = this.templates.find((t) => t.id === templateId);
+    if (!template) {
+      throw new Error(`Không tìm thấy template: ${templateId}`);
+    }
+    if (template.status === 'ARCHIVED') {
+      throw new Error('Không thể tạo bản nháp cho mẫu đã lưu trữ');
+    }
+    if (template.draftVersion) {
+      return {
+        id: template.draftVersion.id,
+        versionNumber: template.draftVersion.versionNumber,
+        title: template.draftVersion.title,
+        status: 'DRAFT',
+      };
+    }
+
+    const nextVer = template.currentVersion + 1;
+    const draft: DraftVersionDetail = {
+      id: `mock-draft-${Date.now()}`,
+      templateId: template.id,
+      versionNumber: nextVer,
+      title: template.title,
+      description: template.description,
+      fields: JSON.parse(JSON.stringify(template.fields)),
+      layoutBlocks: JSON.parse(JSON.stringify(template.layoutBlocks || [])),
+      defaultWorkflowSteps: JSON.parse(JSON.stringify(template.defaultWorkflowSteps || [])),
+      status: 'DRAFT',
+      changeSummary: `Bản nháp chuẩn bị cho phiên bản v${nextVer}`,
+      createdAt: new Date().toISOString(),
+    };
+    template.hasDraft = true;
+    template.draftVersion = draft;
+
+    return {
+      id: draft.id,
+      versionNumber: draft.versionNumber,
+      title: draft.title,
+      status: 'DRAFT',
+    };
+  }
+
+  public async getDraftVersion(templateId: string): Promise<DraftVersionDetail> {
+    const template = this.templates.find((t) => t.id === templateId);
+    if (!template) {
+      throw new Error(`Không tìm thấy template: ${templateId}`);
+    }
+    if (template.status === 'DRAFT') {
+      return {
+        id: template.id,
+        templateId: template.id,
+        versionNumber: 1,
+        title: template.title,
+        description: template.description,
+        fields: template.fields,
+        layoutBlocks: template.layoutBlocks,
+        defaultWorkflowSteps: template.defaultWorkflowSteps,
+        status: 'DRAFT',
+        createdAt: template.createdAt,
+      };
+    }
+    if (!template.draftVersion) {
+      throw new Error('Không có bản nháp nào đang được chuẩn bị cho biểu mẫu này.');
+    }
+    return JSON.parse(JSON.stringify(template.draftVersion));
+  }
+
+  public async updateDraftVersion(
+    templateId: string,
+    payload: UpdateTemplatePayload
+  ): Promise<{ id: string; versionNumber: number; title: string; status: string }> {
+    const template = this.templates.find((t) => t.id === templateId);
+    if (!template) {
+      throw new Error(`Không tìm thấy template: ${templateId}`);
+    }
+    if (template.status === 'DRAFT') {
+      await this.updateTemplate(templateId, payload);
+      return {
+        id: template.id,
+        versionNumber: 1,
+        title: template.title,
+        status: 'DRAFT',
+      };
+    }
+    if (!template.draftVersion) {
+      throw new Error('Chưa có bản nháp cho phiên bản tiếp theo.');
+    }
+
+    if (payload.title) template.draftVersion.title = payload.title;
+    if (payload.description !== undefined) template.draftVersion.description = payload.description;
+    if (payload.fields) template.draftVersion.fields = payload.fields;
+    if (payload.layoutBlocks) template.draftVersion.layoutBlocks = payload.layoutBlocks;
+    if (payload.defaultWorkflowSteps) template.draftVersion.defaultWorkflowSteps = payload.defaultWorkflowSteps;
+
+    return {
+      id: template.draftVersion.id,
+      versionNumber: template.draftVersion.versionNumber,
+      title: template.draftVersion.title,
+      status: 'DRAFT',
+    };
+  }
+
+  public async discardDraftVersion(
+    templateId: string
+  ): Promise<{ success: boolean; message: string }> {
+    const template = this.templates.find((t) => t.id === templateId);
+    if (!template) {
+      throw new Error(`Không tìm thấy template: ${templateId}`);
+    }
+    if (template.status === 'DRAFT') {
+      throw new Error('Không thể hủy bản nháp ban đầu của biểu mẫu chưa xuất bản.');
+    }
+    if (!template.draftVersion) {
+      throw new Error('Không có bản nháp nào để hủy.');
+    }
+    template.hasDraft = false;
+    template.draftVersion = null;
+
+    return {
+      success: true,
+      message: 'Đã hủy bỏ bản nháp thành công.',
+    };
   }
 }

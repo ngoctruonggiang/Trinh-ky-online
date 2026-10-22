@@ -4,6 +4,7 @@ import {
   CreateTemplatePayload,
   UpdateTemplatePayload,
   PublishTemplatePayload,
+  DraftVersionDetail,
 } from '../../types/template.js';
 
 export interface GetTemplatesQuery {
@@ -27,4 +28,13 @@ export interface ITemplateService {
     templateId: string,
     formData: Record<string, any>
   ): Promise<{ valid: boolean; errors: Record<string, string> }>;
+  createDraftVersion(
+    templateId: string
+  ): Promise<{ id: string; versionNumber: number; title: string; status: string }>;
+  getDraftVersion(templateId: string): Promise<DraftVersionDetail>;
+  updateDraftVersion(
+    templateId: string,
+    payload: UpdateTemplatePayload
+  ): Promise<{ id: string; versionNumber: number; title: string; status: string }>;
+  discardDraftVersion(templateId: string): Promise<{ success: boolean; message: string }>;
 }

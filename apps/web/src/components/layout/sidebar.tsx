@@ -11,6 +11,7 @@ import {
   Building2,
   CheckCircle2,
   SlidersHorizontal,
+  GitFork,
 } from 'lucide-react';
 
 export function Sidebar() {
@@ -104,6 +105,17 @@ export function Sidebar() {
         >
           <SlidersHorizontal className="w-4 h-4 shrink-0" />
           <span>Quản lý Biểu mẫu</span>
+        </Link>
+        <Link
+          href="/workflows"
+          className={`flex items-center gap-3 px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
+            pathname.startsWith('/workflows')
+              ? 'bg-blue-600/15 text-blue-400 font-semibold border border-blue-500/20'
+              : 'text-slate-300 hover:bg-slate-800/60 hover:text-white'
+          }`}
+        >
+          <GitFork className="w-4 h-4 shrink-0" />
+          <span>Quản lý Quy trình</span>
         </Link>
       </div>
 

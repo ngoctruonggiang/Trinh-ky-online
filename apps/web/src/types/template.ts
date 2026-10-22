@@ -30,6 +30,20 @@ export interface TemplateVersionItem {
   fieldCount: number;
 }
 
+export interface DraftVersionDetail {
+  id: string;
+  templateId?: string;
+  versionNumber: number;
+  title: string;
+  description?: string | null;
+  fields: FormFieldDefinition[];
+  layoutBlocks?: LayoutBlock[];
+  defaultWorkflowSteps?: DefaultWorkflowStep[];
+  status?: TemplateStatus;
+  changeSummary?: string | null;
+  createdAt: string;
+}
+
 export interface TemplateDetail {
   id: string;
   code: string;
@@ -47,6 +61,8 @@ export interface TemplateDetail {
   createdByName: string;
   createdAt: string;
   updatedAt: string;
+  hasDraft?: boolean;
+  draftVersion?: DraftVersionDetail | null;
   versions: TemplateVersionItem[];
 }
 

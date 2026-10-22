@@ -16,6 +16,8 @@ import {
   validateFormData,
   FormFieldDefinition,
   DefaultWorkflowStep,
+  WorkflowStepConfig,
+  canonicalizeJson,
 } from '@trinh-ky/shared';
 import {
   WorkflowFSM,
@@ -31,6 +33,8 @@ export interface CreateDocumentInput {
   urgency?: UrgencyLevel;
   dueDate?: string;
   formData: Record<string, any>;
+  workflowTemplateId?: string;
+  workflowTemplateVersionId?: string;
   userId: string;
   userOrganizationId?: string | null;
   userDepartmentId?: string | null;
@@ -118,7 +122,7 @@ export class WorkflowOrchestratorService {
    * Tính mã băm SHA-256 từ nội dung dữ liệu
    */
   public computeContentHash(data: any): string {
-    const serialized = typeof data === 'string' ? data : JSON.stringify(data);
+    const serialized = typeof data === 'string' ? data : canonicalizeJson(data || {});
     return createHash('sha256').update(serialized).digest('hex');
   }
 
@@ -815,6 +819,7 @@ export class WorkflowOrchestratorService {
       where: { id: input.templateId },
       include: {
         versions: {
+          where: { status: TemplateStatus.PUBLISHED },
           orderBy: { versionNumber: 'desc' },
           take: 1,
         },
@@ -827,10 +832,8 @@ export class WorkflowOrchestratorService {
     }
 
     // 1. Phân quyền tổ chức (Tenant Check)
-    if (input.userRole !== 'SUPER_ADMIN' && template.organizationId && input.userOrganizationId) {
-      if (template.organizationId !== input.userOrganizationId) {
-        throw new ForbiddenException('Bạn không có quyền tạo hồ sơ từ mẫu của tổ chức khác.');
-      }
+    if (input.userRole !== 'SUPER_ADMIN' && template.organizationId && template.organizationId !== input.userOrganizationId) {
+      throw new ForbiddenException('Bạn không có quyền tạo hồ sơ từ mẫu của tổ chức khác.');
     }
 
     // 2. Kiểm tra vòng đời: Chỉ cho phép tạo hồ sơ từ template đã PUBLISHED
@@ -850,14 +853,75 @@ export class WorkflowOrchestratorService {
       });
     }
 
-    // 4. Sinh mã số hồ sơ TK-YYYY-XXXX
+    // 4. Sinh mã số hồ sơ TK-YYYY-XXXX (kèm hậu tố chống xung đột đồng thời)
     const count = await this.prisma.document.count();
-    const documentNumber = `TK-${new Date().getFullYear()}-${String(count + 1).padStart(4, '0')}`;
+    const randSuffix = Math.floor(100 + Math.random() * 900);
+    const documentNumber = `TK-${new Date().getFullYear()}-${String(count + 1).padStart(4, '0')}-${randSuffix}`;
 
-    // 5. Tính SHA-256 hash của formData
-    const sha256Hash = createHash('sha256')
-      .update(JSON.stringify(input.formData || {}))
-      .digest('hex');
+    // 5. Tính SHA-256 hash chuẩn tắc (Canonical SHA-256) của formData
+    const sha256Hash = this.computeContentHash(input.formData);
+
+    // 5.1 Giải quyết snapshot phiên bản quy trình (WorkflowTemplateVersion)
+    let resolvedWorkflowVersion: any = null;
+
+    if (input.workflowTemplateVersionId) {
+      resolvedWorkflowVersion = await this.prisma.workflowTemplateVersion.findUnique({
+        where: { id: input.workflowTemplateVersionId },
+        include: { workflowTemplate: true },
+      });
+      if (!resolvedWorkflowVersion) {
+        throw new NotFoundException('Không tìm thấy phiên bản quy trình phê duyệt được chỉ định.');
+      }
+      if (resolvedWorkflowVersion.status !== 'PUBLISHED') {
+        throw new BadRequestException('Chỉ có thể tạo hồ sơ từ phiên bản quy trình đã phát hành (PUBLISHED).');
+      }
+      if (
+        input.userRole !== 'SUPER_ADMIN' &&
+        resolvedWorkflowVersion.workflowTemplate.organizationId &&
+        resolvedWorkflowVersion.workflowTemplate.organizationId !== input.userOrganizationId
+      ) {
+        throw new ForbiddenException('Bạn không có quyền sử dụng quy trình phê duyệt của tổ chức khác.');
+      }
+    } else if (input.workflowTemplateId) {
+      const wfTpl = await this.prisma.workflowTemplate.findUnique({
+        where: { id: input.workflowTemplateId },
+        include: {
+          versions: {
+            where: { status: 'PUBLISHED' },
+            orderBy: { versionNumber: 'desc' },
+            take: 1,
+          },
+        },
+      });
+      if (!wfTpl) {
+        throw new NotFoundException('Không tìm thấy mẫu quy trình phê duyệt được chỉ định.');
+      }
+      if (wfTpl.status !== 'PUBLISHED' || wfTpl.versions.length === 0) {
+        throw new BadRequestException('Mẫu quy trình phê duyệt chưa có phiên bản nào được phát hành.');
+      }
+      if (input.userRole !== 'SUPER_ADMIN' && wfTpl.organizationId && wfTpl.organizationId !== input.userOrganizationId) {
+        throw new ForbiddenException('Bạn không có quyền sử dụng quy trình phê duyệt của tổ chức khác.');
+      }
+      resolvedWorkflowVersion = wfTpl.versions[0];
+    } else if (latestVersion?.workflowTemplateVersionId) {
+      resolvedWorkflowVersion = await this.prisma.workflowTemplateVersion.findUnique({
+        where: { id: latestVersion.workflowTemplateVersionId },
+      });
+    } else if (template.workflowTemplateId) {
+      const wfTpl = await this.prisma.workflowTemplate.findUnique({
+        where: { id: template.workflowTemplateId },
+        include: {
+          versions: {
+            where: { status: 'PUBLISHED' },
+            orderBy: { versionNumber: 'desc' },
+            take: 1,
+          },
+        },
+      });
+      if (wfTpl && wfTpl.status === 'PUBLISHED' && wfTpl.versions.length > 0) {
+        resolvedWorkflowVersion = wfTpl.versions[0];
+      }
+    }
 
     const defaultSteps = (
       (latestVersion?.defaultWorkflowSteps || template.defaultWorkflowSteps || []) as unknown as DefaultWorkflowStep[]
@@ -872,6 +936,7 @@ export class WorkflowOrchestratorService {
           title: input.title.trim(),
           templateId: template.id,
           templateVersionId: latestVersion?.id || null,
+          workflowTemplateVersionId: resolvedWorkflowVersion?.id || null,
           status: DocumentStatus.DRAFT,
           urgency: (input.urgency as any) || UrgencyLevel.NORMAL,
           dueDate: input.dueDate ? new Date(input.dueDate) : null,
@@ -905,7 +970,146 @@ export class WorkflowOrchestratorService {
         },
       });
 
-      if (defaultSteps.length > 0) {
+      if (resolvedWorkflowVersion) {
+        const stepsConfig = (resolvedWorkflowVersion.steps || []) as unknown as WorkflowStepConfig[];
+        if (stepsConfig.length === 0) {
+          throw new BadRequestException('Phiên bản quy trình phê duyệt không chứa bất kỳ bước xử lý nào.');
+        }
+
+        for (const stepConfig of stepsConfig) {
+          const step = await tx.approvalStep.create({
+            data: {
+              workflowId: workflow.id,
+              stepOrder: stepConfig.stepOrder,
+              stepName: stepConfig.stepName,
+              stepType: (stepConfig.stepType as any) || 'SEQUENTIAL',
+              completionRule: (stepConfig.completionRule as any) || 'ALL_MUST_APPROVE',
+              status: StepStatus.WAITING,
+              version: 0,
+            },
+          });
+
+          // Giải quyết người duyệt theo Approver Resolution Engine
+          const approverConfig = stepConfig.approverConfig;
+          let resolvedApproverUserIds: string[] = [];
+
+          if (approverConfig.type === 'SPECIFIC_USERS') {
+            if (!approverConfig.userIds || approverConfig.userIds.length === 0) {
+              throw new BadRequestException(`Bước duyệt "${stepConfig.stepName}" chưa cấu hình danh sách người duyệt.`);
+            }
+
+            const users = await tx.user.findMany({
+              where: { id: { in: approverConfig.userIds } },
+            });
+
+            const foundIds = new Set(users.map((u) => u.id));
+            for (const uid of approverConfig.userIds) {
+              if (!foundIds.has(uid)) {
+                throw new BadRequestException(`Người duyệt chỉ định (${uid}) trong bước "${stepConfig.stepName}" không tồn tại.`);
+              }
+            }
+
+            const inactiveUser = users.find((u) => !u.isActive);
+            if (inactiveUser) {
+              throw new BadRequestException(
+                `Người duyệt "${inactiveUser.fullName}" (${inactiveUser.id}) trong bước "${stepConfig.stepName}" đã bị vô hiệu hóa (inactive).`,
+              );
+            }
+
+            resolvedApproverUserIds = approverConfig.userIds;
+          } else if (approverConfig.type === 'DEPARTMENT_ROLE') {
+            const targetDeptId =
+              approverConfig.departmentPolicy === 'SPECIFIC_DEPARTMENT' && approverConfig.departmentId
+                ? approverConfig.departmentId
+                : input.userDepartmentId;
+
+            if (!targetDeptId) {
+              throw new BadRequestException(
+                `Bước duyệt "${stepConfig.stepName}" yêu cầu phòng ban nhưng hồ sơ không có thông tin phòng ban người tạo.`,
+              );
+            }
+
+            const deptUsers = await tx.user.findMany({
+              where: {
+                departmentId: targetDeptId,
+                isActive: true,
+              },
+            });
+
+            const roleName = (approverConfig.role || '').toUpperCase();
+            const matched = deptUsers.filter((u) => {
+              const pos = (u.positionTitle || '').toUpperCase();
+              return (
+                u.role === roleName ||
+                pos.includes(roleName) ||
+                (roleName === 'MANAGER' && (pos.includes('TRƯỞNG') || pos.includes('MANAGER'))) ||
+                (roleName === 'DIRECTOR' && (pos.includes('GIÁM ĐỐC') || pos.includes('DIRECTOR'))) ||
+                (roleName === 'ACCOUNTANT' && (pos.includes('KẾ TOÁN') || pos.includes('ACCOUNTANT')))
+              );
+            });
+
+            if (matched.length === 0) {
+              throw new BadRequestException(
+                `Không tìm thấy người dùng phù hợp có vai trò/chức danh "${approverConfig.role}" tại phòng ban cho bước "${stepConfig.stepName}".`,
+              );
+            }
+            resolvedApproverUserIds = matched.map((u) => u.id);
+          } else if (approverConfig.type === 'ORGANIZATION_ROLE') {
+            const targetOrgId = input.userOrganizationId || template.organizationId;
+            const orgUsers = await tx.user.findMany({
+              where: {
+                ...(targetOrgId ? { organizationId: targetOrgId } : {}),
+                isActive: true,
+              },
+            });
+
+            const roleName = (approverConfig.role || '').toUpperCase();
+            const matched = orgUsers.filter((u) => {
+              const pos = (u.positionTitle || '').toUpperCase();
+              return (
+                u.role === roleName ||
+                pos.includes(roleName) ||
+                (roleName === 'DIRECTOR' && (pos.includes('GIÁM ĐỐC') || pos.includes('DIRECTOR'))) ||
+                (roleName === 'ACCOUNTANT' && (pos.includes('KẾ TOÁN') || pos.includes('ACCOUNTANT'))) ||
+                (roleName === 'MANAGER' && (pos.includes('TRƯỞNG') || pos.includes('MANAGER')))
+              );
+            });
+
+            if (matched.length === 0) {
+              throw new BadRequestException(
+                `Không tìm thấy người dùng phù hợp có vai trò/chức danh "${approverConfig.role}" trong tổ chức cho bước "${stepConfig.stepName}".`,
+              );
+            }
+            resolvedApproverUserIds = matched.map((u) => u.id);
+          }
+
+          // Tạo StepAssignee cho Approvers
+          for (const uid of resolvedApproverUserIds) {
+            await tx.stepAssignee.create({
+              data: {
+                stepId: step.id,
+                userId: uid,
+                role: AssigneeRole.APPROVER,
+                decision: AssigneeDecision.PENDING,
+              },
+            });
+          }
+
+          // Tạo StepAssignee cho Reviewers (nếu có)
+          if (stepConfig.reviewerUserIds && stepConfig.reviewerUserIds.length > 0) {
+            for (const rUid of stepConfig.reviewerUserIds) {
+              await tx.stepAssignee.create({
+                data: {
+                  stepId: step.id,
+                  userId: rUid,
+                  role: AssigneeRole.REVIEWER,
+                  decision: AssigneeDecision.PENDING,
+                },
+              });
+            }
+          }
+        }
+      } else if (defaultSteps.length > 0) {
         for (const stepConfig of defaultSteps) {
           const step = await tx.approvalStep.create({
             data: {

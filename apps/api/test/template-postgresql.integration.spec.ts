@@ -312,4 +312,158 @@ describe('Template & Form Engine Real PostgreSQL Integration Tests', () => {
       })
     ).rejects.toThrow();
   });
+
+  it('8. Lifecycle: Tạo bản nháp v2 -> Sửa bản nháp -> Phát hành v2 mà không làm thay đổi v1', async () => {
+    // 8.1 Tạo template riêng cho test lifecycle
+    const tplRes = await templateService.createTemplate(
+      {
+        code: `LIFECYCLE_TPL_${Date.now()}`,
+        title: 'Mẫu công tác phí theo chu kỳ',
+        category: 'Hành chính',
+        fields: [
+          { id: 'f1', key: 'chi_phi', label: 'Chi phí', type: 'currency_vnd', required: true, order: 1 },
+        ],
+      },
+      adminAlpha
+    );
+    const tplId = tplRes.data.id;
+
+    // 8.2 Phát hành v1
+    const pub1 = await templateService.publishTemplate(tplId, { changeSummary: 'Phiên bản đầu tiên' }, adminAlpha);
+    expect(pub1.data.versionNumber).toBe(1);
+    const snapV1Id = pub1.data.versionId;
+
+    // 8.3 Tạo hồ sơ tham chiếu v1
+    const doc1 = await orchestrator.createDocument({
+      templateId: tplId,
+      title: 'Hồ sơ tạo từ v1',
+      formData: { chi_phi: 3000000 },
+      userId: userAlpha.id,
+      userOrganizationId: orgAlphaId,
+      userRole: 'USER',
+    });
+    expect(doc1.templateVersionId).toBe(snapV1Id);
+
+    // 8.4 Tạo bản nháp cho phiên bản tiếp theo (v2)
+    const draftRes = await templateService.createDraftVersion(tplId, adminAlpha);
+    expect(draftRes.success).toBe(true);
+    expect(draftRes.data.versionNumber).toBe(2);
+    expect(draftRes.data.status).toBe(TemplateStatus.DRAFT);
+
+    // 8.5 Chỉnh sửa bản nháp tiếp theo (thêm trường dia_diem)
+    const updateDraftRes = await templateService.updateDraftVersion(
+      tplId,
+      {
+        title: 'Mẫu công tác phí theo chu kỳ (Đã sửa đổi v2)',
+        fields: [
+          { id: 'f1', key: 'chi_phi', label: 'Chi phí', type: 'currency_vnd', required: true, order: 1 },
+          { id: 'f2', key: 'dia_diem', label: 'Địa điểm', type: 'text', required: true, order: 2 },
+        ],
+      },
+      adminAlpha
+    );
+    expect(updateDraftRes.success).toBe(true);
+
+    // 8.6 Khi v2 đang là DRAFT, người dùng tạo hồ sơ vẫn nhận v1
+    const docStillV1 = await orchestrator.createDocument({
+      templateId: tplId,
+      title: 'Hồ sơ vẫn nhận v1 trong khi v2 đang soạn thảo',
+      formData: { chi_phi: 4000000 },
+      userId: userAlpha.id,
+      userOrganizationId: orgAlphaId,
+      userRole: 'USER',
+    });
+    expect(docStillV1.templateVersionId).toBe(snapV1Id);
+
+    // 8.7 Phát hành v2 chính thức
+    const pub2 = await templateService.publishTemplate(tplId, { changeSummary: 'Phát hành chính thức v2' }, adminAlpha);
+    expect(pub2.data.versionNumber).toBe(2);
+    const snapV2Id = pub2.data.versionId;
+
+    // 8.8 Tạo hồ sơ sau khi v2 phát hành -> nhận đúng v2
+    const docV2 = await orchestrator.createDocument({
+      templateId: tplId,
+      title: 'Hồ sơ nhận v2',
+      formData: { chi_phi: 5000000, dia_diem: 'Hà Nội' },
+      userId: userAlpha.id,
+      userOrganizationId: orgAlphaId,
+      userRole: 'USER',
+    });
+    expect(docV2.templateVersionId).toBe(snapV2Id);
+
+    // 8.9 Xác minh v1 snapshot trong PostgreSQL không bị thay đổi
+    const snapV1InDb = await prisma.formTemplateVersion.findUnique({ where: { id: snapV1Id } });
+    expect(snapV1InDb?.versionNumber).toBe(1);
+    expect((snapV1InDb?.fields as any[])).toHaveLength(1);
+
+    // Xác minh hồ sơ cũ tạo từ v1 vẫn trỏ đến v1
+    const checkDoc1 = await prisma.document.findUnique({ where: { id: doc1.id } });
+    expect(checkDoc1?.templateVersionId).toBe(snapV1Id);
+  });
+
+  it('9. Bảo vệ snapshot lịch sử: Chặn xóa FormTemplateVersion đang được Document tham chiếu (ON DELETE RESTRICT)', async () => {
+    // version1Id đang được createdDocumentId tham chiếu
+    await expect(
+      prisma.formTemplateVersion.delete({
+        where: { id: version1Id },
+      })
+    ).rejects.toThrow();
+  });
+
+  it('10. Phân quyền đa tổ chức trên PostgreSQL: Chặn Admin Alpha sửa template Beta hoặc template toàn hệ thống', async () => {
+    // 10.1 Tạo template thuộc công ty Beta
+    const betaTemplate = await prisma.formTemplate.create({
+      data: {
+        code: `BETA_FORM_${Date.now()}`,
+        title: 'Mẫu nội bộ công ty Beta',
+        organizationId: orgBetaId,
+        fields: [{ id: '1', key: 'f1', label: 'Field 1', type: 'text', required: false, order: 1 }],
+        layoutBlocks: [],
+        createdById: userBeta.id,
+        status: TemplateStatus.DRAFT,
+      },
+    });
+
+    // Admin Alpha cố gắng cập nhật template của Beta -> bị chặn 403
+    await expect(
+      templateService.updateTemplate(betaTemplate.id, { title: 'Hack' }, adminAlpha)
+    ).rejects.toThrow();
+
+    // 10.2 Tạo template dùng chung toàn hệ thống (organizationId: null)
+    const systemTemplate = await prisma.formTemplate.create({
+      data: {
+        code: `SYS_FORM_${Date.now()}`,
+        title: 'Mẫu toàn hệ thống',
+        organizationId: null,
+        fields: [{ id: '1', key: 'f1', label: 'Field 1', type: 'text', required: false, order: 1 }],
+        layoutBlocks: [],
+        createdById: adminAlpha.id,
+        status: TemplateStatus.DRAFT,
+      },
+    });
+
+    // Admin Alpha cố gắng cập nhật template toàn hệ thống -> bị chặn 403
+    await expect(
+      templateService.updateTemplate(systemTemplate.id, { title: 'Hack System' }, adminAlpha)
+    ).rejects.toThrow();
+  });
+
+  it('11. Xác minh tính toàn vẹn SHA-256 trên PostgreSQL: Chuẩn tắc, khác nội dung thì khác hash, không chuỗi rỗng', async () => {
+    // Tạo 2 payload với các key đảo thứ tự
+    const payloadA = { so_tien: 10000000, ly_do: 'Mua bàn ghế văn phòng' };
+    const payloadB = { ly_do: 'Mua bàn ghế văn phòng', so_tien: 10000000 };
+
+    const hashA = orchestrator.computeContentHash(payloadA);
+    const hashB = orchestrator.computeContentHash(payloadB);
+    expect(hashA).toBe(hashB); // Thứ tự key không làm thay đổi SHA-256 chuẩn tắc
+
+    // Đổi giá trị nội dung làm thay đổi SHA-256
+    const payloadModified = { so_tien: 10000001, ly_do: 'Mua bàn ghế văn phòng' };
+    const hashModified = orchestrator.computeContentHash(payloadModified);
+    expect(hashModified).not.toBe(hashA);
+
+    // Hash không mặc định thành SHA-256 của chuỗi rỗng (empty string SHA-256 là e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855)
+    const emptyStringHash = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+    expect(hashA).not.toBe(emptyStringHash);
+  });
 });

@@ -39,5 +39,26 @@ export const templateService: ITemplateService = isMockMode
   ? mockTemplateService
   : httpTemplateService;
 
-export { mockDocumentService, HttpDocumentService, MockTemplateService, HttpTemplateService };
-export type { ITemplateService };
+import { IWorkflowTemplateService } from './workflow-template-service.interface';
+import { HttpWorkflowTemplateService } from './http-workflow-template-service';
+import { MockWorkflowTemplateService } from './mock-workflow-template-service';
+
+export const mockWorkflowTemplateService = new MockWorkflowTemplateService();
+export const httpWorkflowTemplateService = new HttpWorkflowTemplateService({
+  baseUrl: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000/api',
+  getAuthHeaders,
+});
+
+export const workflowTemplateService: IWorkflowTemplateService = isMockMode
+  ? mockWorkflowTemplateService
+  : httpWorkflowTemplateService;
+
+export {
+  mockDocumentService,
+  HttpDocumentService,
+  MockTemplateService,
+  HttpTemplateService,
+  MockWorkflowTemplateService,
+  HttpWorkflowTemplateService,
+};
+export type { ITemplateService, IWorkflowTemplateService };

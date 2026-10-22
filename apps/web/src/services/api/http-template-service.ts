@@ -5,6 +5,7 @@ import {
   CreateTemplatePayload,
   UpdateTemplatePayload,
   PublishTemplatePayload,
+  DraftVersionDetail,
 } from '@/types/template';
 import { ITemplateService, GetTemplatesQuery } from './template-service.interface';
 
@@ -84,7 +85,7 @@ export class HttpTemplateService implements ITemplateService {
       throw new ApiError(response.status, errorCode, errorMessage, errorObj);
     }
 
-    return responseJson.data as T;
+    return (responseJson.data !== undefined ? responseJson.data : responseJson) as T;
   }
 
   public async getTemplates(
@@ -147,6 +148,38 @@ export class HttpTemplateService implements ITemplateService {
     return this.request(`/templates/${encodeURIComponent(templateId)}/validate`, {
       method: 'POST',
       body: JSON.stringify({ formData }),
+    });
+  }
+
+  public async createDraftVersion(
+    templateId: string
+  ): Promise<{ id: string; versionNumber: number; title: string; status: string }> {
+    return this.request(`/templates/${encodeURIComponent(templateId)}/draft`, {
+      method: 'POST',
+    });
+  }
+
+  public async getDraftVersion(templateId: string): Promise<DraftVersionDetail> {
+    return this.request<DraftVersionDetail>(`/templates/${encodeURIComponent(templateId)}/draft`, {
+      method: 'GET',
+    });
+  }
+
+  public async updateDraftVersion(
+    templateId: string,
+    payload: UpdateTemplatePayload
+  ): Promise<{ id: string; versionNumber: number; title: string; status: string }> {
+    return this.request(`/templates/${encodeURIComponent(templateId)}/draft`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  public async discardDraftVersion(
+    templateId: string
+  ): Promise<{ success: boolean; message: string }> {
+    return this.request(`/templates/${encodeURIComponent(templateId)}/draft`, {
+      method: 'DELETE',
     });
   }
 }

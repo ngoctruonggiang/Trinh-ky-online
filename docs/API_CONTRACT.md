@@ -512,61 +512,155 @@ Dành cho quản lý và biên tập biểu mẫu động (Phase 10). Mọi thao
 - **Quyền hạn:** `ADMIN`, `SUPER_ADMIN`.
 - **Quy tắc:** Chỉ được phép chỉnh sửa khi biểu mẫu ở trạng thái `DRAFT`. Biểu mẫu đã `PUBLISHED` hoặc `ARCHIVED` bị chặn `400 Bad Request`.
 
-### 5.5. Xuất bản / Phát hành phiên bản mới (Publish Template)
+### 5.5. Quản lý bản nháp cho phiên bản tiếp theo (Draft Lifecycle for Next Version)
+Sau khi biểu mẫu đã ở trạng thái `PUBLISHED`, snapshot đã phát hành là **bất biến (immutable)** và không được phép sửa trực tiếp. Để chuẩn bị phiên bản mới, Quản trị viên sử dụng bộ endpoint sau:
+
+#### 5.5.1. Tạo bản nháp phiên bản tiếp theo (Create Draft Version)
+- **Endpoint:** `POST /api/templates/:id/draft`
+- **Quyền hạn:** `ADMIN`, `SUPER_ADMIN`.
+- **Hành vi nghiệp vụ:** Tạo bản ghi `FormTemplateVersion` mới ở trạng thái `DRAFT` với `versionNumber = currentVersion + 1`, sao chép schema từ phiên bản hiện tại. Người dùng tạo hồ sơ vẫn tiếp tục sử dụng snapshot `PUBLISHED` hiện tại mà không bị gián đoạn.
+- **Response (200 OK):**
+```json
+{
+  "success": true,
+  "data": {
+    "id": "uuid-draft-version-id",
+    "templateId": "uuid-tmpl-1",
+    "versionNumber": 2,
+    "title": "Biểu mẫu Đề nghị Thanh toán Chi phí",
+    "status": "DRAFT"
+  }
+}
+```
+
+#### 5.5.2. Lấy thông tin bản nháp đang soạn thảo (Get Draft Version)
+- **Endpoint:** `GET /api/templates/:id/draft`
+- **Quyền hạn:** `ADMIN`, `SUPER_ADMIN`.
+- **Response (200 OK):** Trả về toàn bộ schema trường, tiêu đề, mô tả đang chuẩn bị cho phiên bản tiếp theo. Nếu chưa tạo bản nháp, trả về `404 NOT_FOUND`.
+
+#### 5.5.3. Chỉnh sửa bản nháp tiếp theo (Update Draft Version)
+- **Endpoint:** `PUT /api/templates/:id/draft`
+- **Quyền hạn:** `ADMIN`, `SUPER_ADMIN`.
+- **Request Body:** `{ "title": "Tiêu đề mới", "fields": [ ... ] }`
+- **Hành vi nghiệp vụ:** Cập nhật schema trên bản ghi `FormTemplateVersion` DRAFT mà không chạm vào phiên bản `PUBLISHED` đang hoạt động.
+
+#### 5.5.4. Hủy bỏ bản nháp tiếp theo (Discard Draft Version)
+- **Endpoint:** `DELETE /api/templates/:id/draft`
+- **Quyền hạn:** `ADMIN`, `SUPER_ADMIN`.
+- **Hành vi nghiệp vụ:** Xóa bỏ bản ghi `FormTemplateVersion` DRAFT dở dang. Biểu mẫu quay về trạng thái không có bản nháp. Chặn `400 Bad Request` nếu cố hủy bản nháp ban đầu của biểu mẫu chưa xuất bản lần nào.
+
+### 5.6. Xuất bản / Phát hành phiên bản (Publish Template)
 - **Endpoint:** `POST /api/templates/:id/publish`
 - **Quyền hạn:** `ADMIN`, `SUPER_ADMIN`.
 - **Hành vi nghiệp vụ:**
   - Nếu là bản nháp đầu tiên: chuyển trạng thái sang `PUBLISHED`, tạo bản ghi `FormTemplateVersion` snapshot (v1).
-  - Nếu đã phát hành trước đó: tăng `currentVersion` lên `currentVersion + 1`, tạo snapshot phiên bản mới mà **không sửa đổi snapshot cũ** nhằm bảo toàn tính toàn vẹn của các hồ sơ lịch sử đã tham chiếu.
-- **Request Body:** `{ "changeSummary": "Cập nhật trường ngày đi và ghi chú hạn chế chi phí" }`
-- **Response (200 OK):**
-```json
-{
-  "success": true,
-  "data": {
-    "id": "uuid-tmpl-1",
-    "versionNumber": 2,
-    "versionId": "uuid-version-2-id",
-    "message": "Phát hành phiên bản 2 thành công."
-  }
-}
-```
+  - Nếu đã có bản nháp tiếp theo (v2, v3...): chuyển trạng thái bản nháp đó sang `PUBLISHED`, đồng thời cập nhật `template.currentVersion` lên số phiên bản mới.
+  - **Xử lý xung đột đồng thời (Concurrency Conflict):** Nếu có nhiều request đồng thời cố phát hành cùng một phiên bản, cơ chế khóa giao dịch và ràng buộc Unique (`templateId`, `versionNumber`) của PostgreSQL sẽ trả về `409 CONFLICT` với thông điệp: *"Phiên bản biểu mẫu vừa được một quản trị viên khác phát hành. Vui lòng tải lại trang."*
+- **Request Body:** `{ "changeSummary": "Bổ sung định dạng tiền VND và kiểm tra định mức" }`
 
-### 5.6. Lưu trữ biểu mẫu (Archive Template)
+### 5.7. Lưu trữ biểu mẫu (Archive Template)
 - **Endpoint:** `POST /api/templates/:id/archive`
 - **Quyền hạn:** `ADMIN`, `SUPER_ADMIN`.
-- **Hành vi nghiệp vụ:** Chuyển trạng thái sang `ARCHIVED`. Ngăn không cho người dùng tạo hồ sơ mới từ biểu mẫu này. Hồ sơ cũ vẫn xem lại bình thường.
+- **Hành vi nghiệp vụ:** Chuyển trạng thái sang `ARCHIVED`. Ngăn không cho người dùng tạo hồ sơ mới từ biểu mẫu này (`400 Bad Request`). Hồ sơ cũ vẫn xem lại bình thường.
 
-### 5.7. Thẩm định trước dữ liệu biểu mẫu (Validate Form Data)
+### 5.8. Thẩm định trước dữ liệu biểu mẫu (Validate Form Data)
 - **Endpoint:** `POST /api/templates/:id/validate`
 - **Request Body:** `{ "formData": { ... } }`
-- **Response (200 OK):**
-```json
-{
-  "success": true,
-  "data": {
-    "valid": false,
-    "errors": {
-      "destination": "Trường này là bắt buộc",
-      "from_date": "Định dạng ngày không hợp lệ"
-    }
-  }
-}
-```
+- **Quy tắc Thẩm định Chặt chẽ (Hardened Validation Rules):**
+  1. **Trường không được khai báo (Undeclared Keys):** Bị từ chối `400 Bad Request` (`Trường "{key}" không tồn tại trong cấu hình biểu mẫu`).
+  2. **Số hữu hạn (Finite Numbers):** Loại bỏ `NaN`, `Infinity`, `-Infinity`.
+  3. **Tiền tệ VNĐ (`currency_vnd`):** Bắt buộc là số nguyên không âm (`Integer >= 0`).
+  4. **Ngày hợp lệ theo lịch (Calendar Date Validation):** Kiểm tra chính xác ngày theo lịch dương lịch, từ chối các ngày không tồn tại (ví dụ: `2026-02-31`).
+  5. **Chống ReDoS (Regular Expression Denial of Service):** Biểu thức chính quy không được dài quá 200 ký tự và không chứa nested quantifiers có nguy cơ suy thoái lũy thừa (`(a+)+`, `(a*)*`).
 
 ---
 
 ## 6. NHỮNG GIỚI HẠN & LƯU Ý KHI GHÉP GIAO DIỆN (FRONTEND GOTCHAS)
 
-1. **Không bao giờ gửi `userId` trong Body:**
-   Danh tính của người thực hiện thao tác được Backend tự động trích xuất từ Bearer JWT. Frontend không cần (và không được phép) truyền `userId` vào Body JSON.
-2. **Xử lý xung đột `409 CONCURRENCY_CONFLICT`:**
-   Trong các bước song song (`ANY_CAN_APPROVE`), khi một người đồng cấp khác vừa bấm duyệt trước, người dùng bấm sau sẽ nhận mã lỗi 409. Frontend cần hiển thị thông báo thân thiện: *"Bước duyệt này đã được một người duyệt khác xử lý trước đó. Đang tải lại trạng thái hồ sơ..."* và tự động refresh dữ liệu trang.
-3. **Chữ ký cá nhân:**
-   Hiện tại `signatureImageUrl` là URL ảnh (PNG/SVG nền trong suốt). Frontend có thể tích hợp canvas vẽ chữ ký tay hoặc tải ảnh lên để lấy URL trước khi gọi endpoint `POST /decision`.
-4. **Phân tách Chế độ Dữ liệu (Mock vs Real API):**
-   Frontend sử dụng kiến trúc Service Adapter `IDocumentService` và `ITemplateService` với 2 implementation song song: `MockDocumentService` / `HttpDocumentService`, `MockTemplateService` / `HttpTemplateService`. Mặc định chạy ở chế độ Mock an toàn trong local development mà không có backend, và chuyển sang Real API khi biến môi trường `NEXT_PUBLIC_USE_MOCK_API='false'`. Không bao giờ tự động chuyển ngầm sang mock khi API thật bị lỗi mạng hay trả về lỗi 4xx/5xx.
-5. **Bảo toàn Phiên bản Biểu mẫu Lịch sử (Immutable Form Snapshots):**
-   Hồ sơ khi tạo được gán `templateVersionId` chỉ định trực tiếp đến snapshot tại thời điểm khởi tạo. Dù Admin có cập nhật, thêm bớt trường hay phát hành v2, v3, thì hồ sơ v1 vẫn mở lại và dựng lại form theo đúng phiên bản v1 ban đầu.
+1. **Không bao giờ gửi `userId`, `organizationId` trong Body:**
+   Danh tính và phạm vi tổ chức của người thực hiện thao tác được Backend tự động trích xuất từ Bearer JWT. Mọi trường hợp cố ý giả mạo `organizationId` hoặc `createdById` trong request body đều bị backend bỏ qua hoặc từ chối.
+2. **Bảo vệ Biểu mẫu Toàn Hệ thống (`organizationId: null`):**
+   Biểu mẫu dùng chung toàn hệ thống chỉ có `SUPER_ADMIN` mới có quyền chỉnh sửa, phát hành hoặc lưu trữ. Quản trị viên công ty thành viên (`ADMIN`) bị chặn `403 FORBIDDEN` nếu cố thao tác đột biến trên mẫu chung.
+3. **Xử lý xung đột `409 CONFLICT`:**
+   - Khi duyệt hồ sơ: Xung đột khi có người duyệt trước trong nhóm `ANY_CAN_APPROVE`.
+   - Khi phát hành biểu mẫu: Xung đột khi nhiều quản trị viên cùng bấm phát hành đồng thời. Frontend cần hiển thị thông báo thân thiện và tải lại dữ liệu mới nhất.
+4. **Toàn vẹn Dữ liệu & SHA-256 Content Hash:**
+   Backend tự động chuẩn hóa thứ tự các trường dữ liệu (`canonicalizeJson`) theo chuẩn đệ quy trước khi tạo mã băm SHA-256 lưu trữ vào `DocumentVersion.contentHash`. Lưu ý: **Mã băm này là chứng thư toàn vẹn nội dung chống sửa đổi dữ liệu (tamper-evident data integrity hash), không phải chữ ký số xác thực danh tính cá nhân.**
+5. **Ràng buộc khóa ngoại PostgreSQL (`ON DELETE RESTRICT`):**
+   `documents.templateVersionId` được cấu hình `ON DELETE RESTRICT`. Bất kỳ hành động xóa nào đối với `FormTemplateVersion` đang được hồ sơ tham chiếu sẽ bị PostgreSQL từ chối tuyệt đối nhằm bảo vệ lịch sử hồ sơ.
+6. **Phân tách Chế độ Dữ liệu (Mock vs Real API):**
+   Frontend sử dụng kiến trúc Service Adapter `IDocumentService`, `ITemplateService` và `IWorkflowTemplateService` với 2 implementation song song: Mock và Http. Mặc định chạy ở chế độ Mock an toàn trong local development mà không có backend, và chuyển sang Real API khi biến môi trường `NEXT_PUBLIC_USE_MOCK_API='false'`. Không bao giờ tự động chuyển ngầm sang mock khi API thật bị lỗi mạng hay trả về lỗi 4xx/5xx.
+
+---
+
+## 7. QUY TRÌNH PHÊ DUYỆT ĐỘNG (WORKFLOW BUILDER & VERSIONED APPROVAL ENGINE)
+
+### 7.1. Lấy danh sách quy trình phê duyệt (Get Workflow Templates)
+- **Endpoint:** `GET /api/workflow-templates`
+- **Query Params:** `status` (`PUBLISHED`, `DRAFT`, `ARCHIVED`, `ALL`), `category`, `search`, `page`, `limit`.
+- **Quyền hạn:**
+  - `USER`: Chỉ xem các quy trình đã `PUBLISHED` thuộc công ty mình hoặc dùng chung toàn hệ thống (`organizationId: null`).
+  - `ADMIN`: Xem tất cả trạng thái quy trình thuộc công ty mình và quy trình dùng chung toàn hệ thống.
+  - `SUPER_ADMIN`: Xem toàn bộ quy trình trên toàn hệ thống.
+
+### 7.2. Lấy chi tiết quy trình phê duyệt (Get Workflow Template Detail)
+- **Endpoint:** `GET /api/workflow-templates/:id`
+- **Response (200 OK):** Trả về chi tiết quy trình, danh sách các bước hiện tại, thông tin bản nháp (nếu có `hasDraft: true`) và toàn bộ danh sách các phiên bản snapshot bất biến (`versions`).
+
+### 7.3. Tạo quy trình phê duyệt mới (Create Workflow Template)
+- **Endpoint:** `POST /api/workflow-templates`
+- **Quyền hạn:** `ADMIN`, `SUPER_ADMIN`.
+- **Request Body:**
+```json
+{
+  "code": "WF_EXPENSE_HQ",
+  "title": "Quy trình phê duyệt chi phí & tạm ứng",
+  "category": "Tài chính",
+  "steps": [
+    {
+      "stepKey": "step_mgr",
+      "stepName": "Trưởng phòng chuyên môn duyệt",
+      "stepOrder": 1,
+      "stepType": "SEQUENTIAL",
+      "completionRule": "ALL_MUST_APPROVE",
+      "approverConfig": {
+        "type": "DEPARTMENT_ROLE",
+        "role": "MANAGER",
+        "departmentPolicy": "SAME_AS_DOCUMENT"
+      },
+      "reviewerUserIds": []
+    },
+    {
+      "stepKey": "step_dir",
+      "stepName": "Ban Giám đốc phê duyệt",
+      "stepOrder": 2,
+      "stepType": "SEQUENTIAL",
+      "completionRule": "ANY_CAN_APPROVE",
+      "approverConfig": {
+        "type": "ORGANIZATION_ROLE",
+        "role": "DIRECTOR"
+      },
+      "reviewerUserIds": []
+    }
+  ]
+}
+```
+
+### 7.4. Vòng đời Phiên bản & Bản nháp (Draft Versioning Lifecycle)
+1. **Tạo bản nháp cho phiên bản tiếp theo:** `POST /api/workflow-templates/:id/draft` (Tạo `WorkflowTemplateVersion` có `status: 'DRAFT'` với `versionNumber = currentVersion + 1`).
+2. **Lấy thông tin bản nháp:** `GET /api/workflow-templates/:id/draft`.
+3. **Cập nhật bản nháp:** `PUT /api/workflow-templates/:id/draft`.
+4. **Hủy bản nháp an toàn:** `DELETE /api/workflow-templates/:id/draft` (Xóa bỏ bản nháp dở dang, bảo vệ nguyên vẹn các phiên bản đã xuất bản).
+5. **Phát hành phiên bản (Publish):** `POST /api/workflow-templates/:id/publish` (Chốt bất biến snapshot phiên bản, trả về `409 CONFLICT` nếu có xung đột phát hành đồng thời).
+
+### 7.5. Động cơ Giải quyết Người duyệt (Approver Resolution Engine)
+Khi hồ sơ được tạo (`POST /api/documents`) liên kết với `workflowTemplateId` hoặc `workflowTemplateVersionId`:
+1. **`SPECIFIC_USERS`:** Giải quyết trực tiếp danh sách userId; xác minh mọi user đều tồn tại và đang `isActive: true`. Nếu có user không tồn tại hoặc bị vô hiệu hóa, hệ thống từ chối `400 Bad Request` và rollback giao dịch.
+2. **`DEPARTMENT_ROLE`:** Quét người dùng theo `departmentId` và `role` (`MANAGER`, `ACCOUNTANT`, `DIRECTOR`, `ADMIN`). Nếu phòng ban chưa có người giữ chức danh phù hợp, hệ thống từ chối `400 Bad Request` và rollback toàn bộ giao dịch, không tạo bước rỗng.
+3. **`ORGANIZATION_ROLE`:** Quét người dùng giữ vai trò/chức danh toàn công ty. Chặn và rollback nếu không tìm thấy người phù hợp.
+4. **Quy tắc hoàn thành:**
+   - `ALL_MUST_APPROVE`: Mọi người duyệt được phân công phải bấm Duyệt.
+   - `ANY_CAN_APPROVE`: Chỉ cần bất kỳ 1 người duyệt bấm Duyệt, bước sẽ hoàn thành và chuyển sang bước tiếp theo.
+5. **Toàn vẹn khóa ngoại CSDL:** `Document.workflowTemplateVersionId` có ràng buộc `onDelete: Restrict`, ngăn chặn việc xóa bỏ snapshot phiên bản quy trình khi đang có hồ sơ lịch sử tham chiếu.
 
 

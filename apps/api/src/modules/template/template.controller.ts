@@ -3,6 +3,7 @@ import {
   Get,
   Post,
   Put,
+  Delete,
   Param,
   Body,
   Query,
@@ -74,6 +75,58 @@ export class TemplateController {
     @CurrentUser() user: UserPrincipal
   ) {
     const result = await this.templateService.updateTemplate(id, dto, user);
+    return {
+      ...result,
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  @Post(':id/draft')
+  @HttpCode(HttpStatus.OK)
+  async createDraftVersion(
+    @Param('id') id: string,
+    @CurrentUser() user: UserPrincipal
+  ) {
+    const result = await this.templateService.createDraftVersion(id, user);
+    return {
+      ...result,
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  @Get(':id/draft')
+  async getDraftVersion(
+    @Param('id') id: string,
+    @CurrentUser() user: UserPrincipal
+  ) {
+    const result = await this.templateService.getDraftVersion(id, user);
+    return {
+      success: true,
+      data: result,
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  @Put(':id/draft')
+  async updateDraftVersion(
+    @Param('id') id: string,
+    @Body() dto: UpdateTemplateDto,
+    @CurrentUser() user: UserPrincipal
+  ) {
+    const result = await this.templateService.updateDraftVersion(id, dto, user);
+    return {
+      ...result,
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  @Delete(':id/draft')
+  @HttpCode(HttpStatus.OK)
+  async discardDraftVersion(
+    @Param('id') id: string,
+    @CurrentUser() user: UserPrincipal
+  ) {
+    const result = await this.templateService.discardDraftVersion(id, user);
     return {
       ...result,
       timestamp: new Date().toISOString(),

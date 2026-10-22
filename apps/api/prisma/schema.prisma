@@ -27,10 +27,11 @@ model Organization {
 
   parent       Organization?  @relation("OrgHierarchy", fields: [parentId], references: [id])
   children     Organization[] @relation("OrgHierarchy")
-  departments  Department[]
-  users        User[]
-  documents    Document[]
-  templates    FormTemplate[]
+  departments       Department[]
+  users             User[]
+  documents         Document[]
+  templates         FormTemplate[]
+  workflowTemplates WorkflowTemplate[]
 
   @@map("organizations")
 }
@@ -68,14 +69,16 @@ model User {
   organization   Organization? @relation(fields: [organizationId], references: [id])
   department     Department?   @relation(fields: [departmentId], references: [id])
 
-  createdTemplates        FormTemplate[]
-  createdTemplateVersions FormTemplateVersion[]
-  createdDocuments        Document[]          @relation("DocumentCreator")
-  assignedSteps           StepAssignee[]
-  signatures              SignatureEvent[]
-  comments                DocumentComment[]
-  auditLogs               AuditLog[]
-  decisionHistories       StepDecisionHistory[]
+  createdTemplates                FormTemplate[]
+  createdTemplateVersions         FormTemplateVersion[]
+  createdWorkflowTemplates        WorkflowTemplate[]
+  createdWorkflowTemplateVersions WorkflowTemplateVersion[]
+  createdDocuments                Document[]          @relation("DocumentCreator")
+  assignedSteps                   StepAssignee[]
+  signatures                      SignatureEvent[]
+  comments                        DocumentComment[]
+  auditLogs                       AuditLog[]
+  decisionHistories               StepDecisionHistory[]
 
   @@map("users")
 }
@@ -104,15 +107,17 @@ model FormTemplate {
   fields               Json
   // JSON chứa danh sách các Layout Block hiển thị tài liệu/PDF: header, text, grid, table, signature...
   layoutBlocks         Json
-  // JSON cấu hình các bước duyệt mặc định của biểu mẫu
+  // JSON cấu hình các bước duyệt mặc định của biểu mẫu (Backward compatibility)
   defaultWorkflowSteps Json?
+  workflowTemplateId   String?
 
   createdById          String
   createdAt            DateTime       @default(now())
   updatedAt            DateTime       @updatedAt
 
-  organization         Organization?  @relation(fields: [organizationId], references: [id], onDelete: SetNull)
-  createdBy            User           @relation(fields: [createdById], references: [id])
+  organization         Organization?     @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  createdBy            User              @relation(fields: [createdById], references: [id])
+  workflowTemplate     WorkflowTemplate? @relation(fields: [workflowTemplateId], references: [id], onDelete: SetNull)
   versions             FormTemplateVersion[]
   documents            Document[]
 
@@ -120,25 +125,77 @@ model FormTemplate {
 }
 
 model FormTemplateVersion {
-  id                   String         @id @default(uuid())
-  templateId           String
-  versionNumber        Int
-  title                String
-  description          String?
-  fields               Json
-  layoutBlocks         Json
-  defaultWorkflowSteps Json?
-  changeSummary        String?
-  status               TemplateStatus @default(PUBLISHED)
-  createdById          String
-  createdAt            DateTime       @default(now())
+  id                        String         @id @default(uuid())
+  templateId                String
+  versionNumber             Int
+  title                     String
+  description               String?
+  fields                    Json
+  layoutBlocks              Json
+  defaultWorkflowSteps      Json?
+  workflowTemplateVersionId String?
+  changeSummary             String?
+  status                    TemplateStatus @default(PUBLISHED)
+  createdById               String
+  createdAt                 DateTime       @default(now())
 
-  template             FormTemplate   @relation(fields: [templateId], references: [id], onDelete: Cascade)
-  createdByUser        User           @relation(fields: [createdById], references: [id])
-  documents            Document[]
+  template                  FormTemplate             @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  createdByUser             User                     @relation(fields: [createdById], references: [id])
+  workflowTemplateVersion   WorkflowTemplateVersion? @relation(fields: [workflowTemplateVersionId], references: [id], onDelete: SetNull)
+  documents                 Document[]
 
   @@unique([templateId, versionNumber])
   @@map("form_template_versions")
+}
+
+// -------------------------------------------------------------
+// 2.1. QUY TRÌNH PHÊ DUYỆT ĐỘNG (Workflow Templates & Versions)
+// -------------------------------------------------------------
+
+model WorkflowTemplate {
+  id                   String                  @id @default(uuid())
+  organizationId       String?                 // null: Quy trình dùng chung toàn hệ thống (SUPER_ADMIN)
+  code                 String                  @unique // VD: WF_EXPENSE, WF_LEAVE
+  title                String                  // VD: Quy trình duyệt chi phí & tạm ứng
+  description          String?
+  category             String                  @default("Chung")
+  status               TemplateStatus          @default(DRAFT)
+  currentVersion       Int                     @default(1)
+
+  // JSON lưu cấu hình các bước của quy trình (stepKey, stepName, stepOrder, stepType, completionRule, approverConfig...)
+  steps                Json
+
+  createdById          String
+  createdAt            DateTime                @default(now())
+  updatedAt            DateTime                @updatedAt
+
+  organization         Organization?           @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  createdBy            User                    @relation(fields: [createdById], references: [id])
+  versions             WorkflowTemplateVersion[]
+  formTemplates        FormTemplate[]
+
+  @@map("workflow_templates")
+}
+
+model WorkflowTemplateVersion {
+  id                   String                  @id @default(uuid())
+  workflowTemplateId   String
+  versionNumber        Int
+  title                String
+  description          String?
+  steps                Json
+  changeSummary        String?
+  status               TemplateStatus          @default(PUBLISHED)
+  createdById          String
+  createdAt            DateTime                @default(now())
+
+  workflowTemplate     WorkflowTemplate        @relation(fields: [workflowTemplateId], references: [id], onDelete: Cascade)
+  createdByUser        User                    @relation(fields: [createdById], references: [id])
+  formTemplateVersions FormTemplateVersion[]
+  documents            Document[]
+
+  @@unique([workflowTemplateId, versionNumber])
+  @@map("workflow_template_versions")
 }
 
 // -------------------------------------------------------------
@@ -166,13 +223,14 @@ model Document {
   id                String         @id @default(uuid())
   documentNumber    String         @unique // Mã số tự tăng: VD: TK-2026-0001
   title             String         // Tiêu đề hồ sơ
-  templateId        String
-  templateVersionId String?        // Phiên bản cụ thể của biểu mẫu tại thời điểm tạo
-  status            DocumentStatus @default(DRAFT)
-  urgency           UrgencyLevel   @default(NORMAL)
-  dueDate           DateTime?      // Hạn hoàn tất xử lý
-  currentStepOrder  Int            @default(1)
-  currentVersion    Int            @default(1)
+  templateId                String
+  templateVersionId         String?        // Phiên bản cụ thể của biểu mẫu tại thời điểm tạo
+  workflowTemplateVersionId String?        // Phiên bản cụ thể của quy trình duyệt tại thời điểm tạo
+  status                    DocumentStatus @default(DRAFT)
+  urgency                   UrgencyLevel   @default(NORMAL)
+  dueDate                   DateTime?      // Hạn hoàn tất xử lý
+  currentStepOrder          Int            @default(1)
+  currentVersion            Int            @default(1)
   
   createdById       String
   organizationId    String?
@@ -180,9 +238,10 @@ model Document {
   createdAt         DateTime       @default(now())
   updatedAt         DateTime       @updatedAt
 
-  template          FormTemplate         @relation(fields: [templateId], references: [id])
-  templateVersion   FormTemplateVersion? @relation(fields: [templateVersionId], references: [id])
-  createdBy         User                 @relation("DocumentCreator", fields: [createdById], references: [id])
+  template                FormTemplate             @relation(fields: [templateId], references: [id])
+  templateVersion         FormTemplateVersion?     @relation(fields: [templateVersionId], references: [id], onDelete: Restrict)
+  workflowTemplateVersion WorkflowTemplateVersion? @relation(fields: [workflowTemplateVersionId], references: [id], onDelete: Restrict)
+  createdBy               User                     @relation("DocumentCreator", fields: [createdById], references: [id])
   organization      Organization?        @relation(fields: [organizationId], references: [id])
   department        Department?          @relation(fields: [departmentId], references: [id])
 

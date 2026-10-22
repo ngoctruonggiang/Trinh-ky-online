@@ -32,4 +32,12 @@ export class CreateDocumentDto {
   @IsObject({ message: 'Dữ liệu biểu mẫu (formData) phải là JSON Object' })
   @IsNotEmpty({ message: 'Dữ liệu biểu mẫu không được để trống' })
   formData!: Record<string, any>;
+
+  @IsOptional()
+  @IsString()
+  workflowTemplateId?: string;
+
+  @IsOptional()
+  @IsString()
+  workflowTemplateVersionId?: string;
 }

@@ -62,6 +62,8 @@ export class DocumentWorkflowController {
       urgency: dto.urgency,
       dueDate: dto.dueDate,
       formData: dto.formData,
+      workflowTemplateId: dto.workflowTemplateId,
+      workflowTemplateVersionId: dto.workflowTemplateVersionId,
       userId: user.id,
       userOrganizationId: user.organizationId,
       userDepartmentId: user.departmentId,

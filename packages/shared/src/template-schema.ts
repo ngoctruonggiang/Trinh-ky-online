@@ -279,10 +279,16 @@ export function validateTemplateSchema(template: Partial<FormTemplate>): {
     // Kiểm tra tính hợp lệ của regex validation (tránh ReDoS hoặc biểu thức độc hại)
     const regexPattern = field.validation?.pattern || field.validation?.regex;
     if (regexPattern) {
-      try {
-        new RegExp(regexPattern);
-      } catch {
-        errors.push(`Biểu thức chính quy (pattern) của trường "${key}" không hợp lệ.`);
+      if (regexPattern.length > 200) {
+        errors.push(`Biểu thức chính quy (pattern) của trường "${key}" quá dài (tối đa 200 ký tự).`);
+      } else if (/\([^)]*[\+\*][^)]*\)[\+\*]/.test(regexPattern) || /(\+|\*|\{[0-9]+,\})\s*(\+|\*|\{[0-9]+,\})/.test(regexPattern)) {
+        errors.push(`Biểu thức chính quy (pattern) của trường "${key}" có nguy cơ gây tắc nghẽn tài nguyên (ReDoS).`);
+      } else {
+        try {
+          new RegExp(regexPattern);
+        } catch {
+          errors.push(`Biểu thức chính quy (pattern) của trường "${key}" không hợp lệ.`);
+        }
       }
     }
   });
@@ -294,9 +300,25 @@ export function validateTemplateSchema(template: Partial<FormTemplate>): {
 }
 
 /**
+ * Tuần tự hóa JSON chuẩn tắc (Canonical JSON) với sắp xếp key đệ quy
+ * Đảm bảo 2 payload có cùng cấu trúc ngữ nghĩa luôn cho ra chuỗi hash SHA-256 đồng nhất.
+ */
+export function canonicalizeJson(value: any): string {
+  if (value === null || typeof value !== 'object') {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return '[' + value.map(canonicalizeJson).join(',') + ']';
+  }
+  const keys = Object.keys(value).sort();
+  return '{' + keys.map((k) => `${JSON.stringify(k)}:${canonicalizeJson(value[k])}`).join(',') + '}';
+}
+
+/**
  * Xác thực dữ liệu người dùng nhập (formData) dựa trên danh sách fields của template:
+ * - Chặn các key không được khai báo trong schema (undeclared keys)
  * - Kiểm tra các trường bắt buộc (required)
- * - Kiểm tra kiểu dữ liệu (number, email, date)
+ * - Kiểm tra kiểu dữ liệu (number hữu hạn, currency VND nguyên không âm, email chuẩn, calendar date)
  * - Kiểm tra giới hạn min, max, minLength, maxLength
  * - Kiểm tra giá trị lựa chọn phải nằm trong options (whitelist)
  */
@@ -310,6 +332,19 @@ export function validateFormData(
   const errors: Record<string, string> = {};
   const safeData = formData || {};
 
+  // 1. Kiểm tra chính sách: Chặn các trường không được khai báo trong schema
+  const declaredKeySet = new Set(
+    fields.map((f) => (f.key || f.name || '').trim().toLowerCase()).filter(Boolean)
+  );
+
+  for (const rawKey of Object.keys(safeData)) {
+    const k = rawKey.trim();
+    if (!declaredKeySet.has(k.toLowerCase())) {
+      errors[rawKey] = `Trường dữ liệu "${rawKey}" không được định nghĩa trong biểu mẫu.`;
+    }
+  }
+
+  // 2. Kiểm tra từng trường được định nghĩa trong schema
   for (const field of fields) {
     const key = (field.key || field.name || '').trim();
     if (!key) continue;
@@ -321,7 +356,7 @@ export function validateFormData(
       (typeof value === 'string' && value.trim() === '') ||
       (Array.isArray(value) && value.length === 0);
 
-    // 1. Kiểm tra trường bắt buộc
+    // 2.1. Kiểm tra trường bắt buộc
     if (field.required && isMissing) {
       errors[key] = `Vui lòng nhập/chọn "${field.label}".`;
       continue;
@@ -332,13 +367,12 @@ export function validateFormData(
 
     const normalizedType = field.type.toLowerCase();
 
-    // 2. Kiểm tra theo kiểu dữ liệu
+    // 2.2. Kiểm tra theo kiểu dữ liệu
     switch (normalizedType) {
-      case 'number':
-      case 'currency_vnd': {
+      case 'number': {
         const num = Number(value);
-        if (isNaN(num)) {
-          errors[key] = `"${field.label}" phải là một chữ số hợp lệ.`;
+        if (isNaN(num) || !Number.isFinite(num)) {
+          errors[key] = `"${field.label}" phải là một chữ số hữu hạn hợp lệ.`;
           break;
         }
         if (field.validation?.min !== undefined && num < field.validation.min) {
@@ -352,19 +386,55 @@ export function validateFormData(
         break;
       }
 
+      case 'currency_vnd': {
+        const num = Number(value);
+        if (isNaN(num) || !Number.isFinite(num)) {
+          errors[key] = `"${field.label}" phải là một số tiền hợp lệ.`;
+          break;
+        }
+        if (!Number.isInteger(num)) {
+          errors[key] = `"${field.label}" (VND) phải là số nguyên, không chứa số thập phân.`;
+          break;
+        }
+        if (num < 0 && (field.validation?.min === undefined || field.validation.min >= 0)) {
+          errors[key] = `"${field.label}" không được là số tiền âm.`;
+          break;
+        }
+        if (field.validation?.min !== undefined && num < field.validation.min) {
+          errors[key] = `"${field.label}" không được nhỏ hơn ${field.validation.min.toLocaleString('vi-VN')} ₫.`;
+          break;
+        }
+        if (field.validation?.max !== undefined && num > field.validation.max) {
+          errors[key] = `"${field.label}" không được lớn hơn ${field.validation.max.toLocaleString('vi-VN')} ₫.`;
+          break;
+        }
+        break;
+      }
+
       case 'email': {
         const emailStr = String(value).trim();
-        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        if (!emailRegex.test(emailStr)) {
+        const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+        if (!emailRegex.test(emailStr) || emailStr.includes('..')) {
           errors[key] = `"${field.label}" không đúng định dạng email (ví dụ: name@company.com).`;
         }
         break;
       }
 
       case 'date': {
-        const dateVal = new Date(value);
+        const dateStr = String(value).trim();
+        const dateVal = new Date(dateStr);
         if (isNaN(dateVal.getTime())) {
           errors[key] = `"${field.label}" không đúng định dạng ngày tháng hợp lệ.`;
+        } else if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+          const [year, month, day] = dateStr.split('-').map(Number);
+          const checkDate = new Date(Date.UTC(year, month - 1, day));
+          if (
+            checkDate.getUTCFullYear() !== year ||
+            checkDate.getUTCMonth() !== month - 1 ||
+            checkDate.getUTCDate() !== day
+          ) {
+            errors[key] = `"${field.label}" là ngày không tồn tại trong lịch (${dateStr}).`;
+          }
         }
         break;
       }
@@ -373,14 +443,13 @@ export function validateFormData(
       case 'radio': {
         const options = normalizeFieldOptions(field.options);
         const validValues = options.map((opt) => opt.value);
-        if (validValues.length > 0 && !validValues.includes(String(value))) {
+        if (validValues.length === 0 || !validValues.includes(String(value))) {
           errors[key] = `Giá trị "${value}" không nằm trong danh sách lựa chọn hợp lệ của "${field.label}".`;
         }
         break;
       }
 
       case 'checkbox': {
-        // Checkbox có thể là boolean (true/false) hoặc mảng các giá trị được chọn
         if (Array.isArray(value)) {
           const options = normalizeFieldOptions(field.options);
           const validValues = options.map((opt) => opt.value);

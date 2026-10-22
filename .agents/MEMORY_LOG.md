@@ -1,51 +1,59 @@
 # MEMORY LOG - DỰ ÁN TRÌNH KÝ ONLINE
 
 ## 1. Trạng thái hiện tại (Current State)
-- **Tình trạng dự án:** Hoàn thành toàn diện Phase 10: Form Builder & Dynamic Template Engine (**140 Unit tests PASS [31 shared + 75 api + 34 web], 28 Real PostgreSQL Integration tests PASS, `pnpm build` toàn monorepo PASS 100%**).
+- **Tình trạng dự án:** Hoàn thành toàn diện Phase 11 — Workflow Builder & Versioned Approval Engine (**186 Unit tests PASS [46 shared + 94 api + 46 web], 44 Real PostgreSQL Integration tests PASS, 22/22 Live HTTP E2E tests PASS, `pnpm build` toàn monorepo PASS 100%**).
+- **Trạng thái dịch vụ đang chạy phục vụ kiểm thử (Active Servers):**
+  - **PostgreSQL Database:** Docker Container `trinh-ky-postgres-dev` (`postgres:16-alpine`) chạy healthy tại `localhost:5432`.
+  - **Backend API Server (NestJS):** Đang chạy tại `http://localhost:4000` (task-2469), sẵn sàng nhận request từ frontend và các công cụ test API.
+  - **Frontend Web App (Next.js):** Đang chạy tại `http://localhost:3000` (task-2137), hỗ trợ cả giao diện quản lý biểu mẫu, tạo hồ sơ, chi tiết phê duyệt và trình thiết kế luồng duyệt trực quan (/workflows).
 - **Môi trường Database:**
   - Docker Container `trinh-ky-postgres-dev` (`postgres:16-alpine`) chạy healthy trên cổng 5432.
-  - Đã chạy migration phi phá hủy: `20261021153000_add_form_template_version` bổ sung `FormTemplateVersion`, `FormTemplate.organizationId`, `FormTemplate.currentVersion`, và `Document.templateVersionId`.
-- **Tính năng vừa hoàn thành (Phase 10):**
-  - `packages/shared`:
-    - Thư viện schema động [template-schema.ts](file:///f:/Projects/Trinh%20ky%20online/Trinh%20ky%20online/packages/shared/src/template-schema.ts): Hỗ trợ các kiểu trường `text`, `textarea`, `number`, `date`, `select`, `radio`, `checkbox`, `email`, `currency_vnd`. Validate schema backend, phòng chống duplicate key, type mismatch, XSS/expression injection, và validate formData độc lập.
-    - 15 unit tests `template-schema.spec.ts` (Tổng: 31/31 PASS).
-  - `apps/api`:
-    - Model & Migrations: `FormTemplateVersion` lưu snapshot bất biến của schema mỗi khi phát hành. `Document` liên kết `templateVersionId` bảo toàn tính xem lại hồ sơ lịch sử.
-    - `TemplateService` & `TemplateController`: 6 endpoint quản lý template (`GET /templates`, `GET /templates/:id`, `POST /templates`, `PUT /templates/:id`, `POST /templates/:id/publish`, `POST /templates/:id/archive`, `POST /templates/:id/validate`). Phân quyền ADMIN/SUPER_ADMIN và cô lập dữ liệu theo tổ chức `organizationId`.
-    - `WorkflowOrchestratorService.createDocument`: Endpoint `POST /api/documents` khởi tạo hồ sơ `DRAFT` từ mẫu đã `PUBLISHED`, kiểm tra schema hợp lệ, sinh số hồ sơ, tính toán SHA-256 hash và khởi tạo các bước duyệt theo template trong cùng 1 database transaction.
-    - 14 unit tests mới cho template service (Tổng api unit: 75/75 PASS).
-    - 7 PostgreSQL integration tests trên DB thật [template-postgresql.integration.spec.ts](file:///f:/Projects/Trinh%20ky%20online/Trinh%20ky%20online/apps/api/test/template-postgresql.integration.spec.ts) (Tổng integration: 28/28 PASS).
-  - `apps/web`:
-    - Component `DynamicFormRenderer`: Dựng form động theo schema từ API, hỗ trợ đầy đủ các kiểu trường, validation lỗi thân thiện, bảo lưu dữ liệu nhập.
-    - Trang Quản lý Biểu mẫu (`/templates`): Xem danh sách mẫu, trạng thái DRAFT / PUBLISHED / ARCHIVED, số phiên bản.
-    - Trang Visual Form Builder (`/templates/new`): Thêm sửa xóa trường, cấu hình nhãn, placeholder, required, options, tab Live Preview trực quan.
-    - Trang Chi tiết & Lịch sử phiên bản (`/templates/[id]`): Hiển thị chi tiết trường, nhật ký các phiên bản đã xuất bản, modal phát hành phiên bản mới.
-    - Trang Khởi tạo Hồ sơ Mới (`/documents/new`): Chọn biểu mẫu đã phát hành, điền dữ liệu động và lưu nháp hồ sơ kết nối trực tiếp với backend.
-    - Chi tiết hồ sơ (`/documents/[id]`): Hỗ trợ hiển thị linh hoạt các trường dữ liệu động mới bên cạnh định dạng truyền thống.
-    - 13 unit tests mới cho `HttpTemplateService` & `MockTemplateService` (Tổng web unit: 34/34 PASS).
-  - `docs/API_CONTRACT.md`: Cập nhật chi tiết 7 endpoint biểu mẫu động và endpoint `POST /api/documents`.
+  - Đã chạy 4 migration liên tiếp:
+    1. `20261021041604_init`
+    2. `20261021153000_add_form_template_version`
+    3. `20261022120000_restrict_document_template_version_delete`
+    4. `20261022130000_add_workflow_template_and_version`: Bổ sung mô hình `WorkflowTemplate` và `WorkflowTemplateVersion` kèm các khóa ngoại `ON DELETE RESTRICT` trên `documents.workflowTemplateVersionId`.
+- **Tính năng vừa hoàn thành (Phase 11):**
+  - **Mô hình Quy trình Phê duyệt Độc lập & Phiên bản Bất biến:**
+    - Cặp thực thể `WorkflowTemplate` và `WorkflowTemplateVersion` cho phép thiết kế quy trình duyệt độc lập hoặc liên kết linh hoạt với `FormTemplate`.
+    - Snapshot phiên bản chốt cứng (`steps` JSON) đảm bảo hồ sơ đã tạo luôn giữ nguyên chuỗi người duyệt ban đầu, không bị ảnh hưởng khi quy trình cha được cập nhật phiên bản mới.
+  - **Vòng đời Versioning & Draft Lifecycle cho Quy trình:**
+    - Hỗ trợ đầy đủ chu trình: DRAFT ban đầu -> Edit DRAFT -> Publish v1 -> Tạo bản nháp v2 (`POST /api/workflow-templates/:id/draft`) -> Sửa draft v2 (`PUT /api/workflow-templates/:id/draft`) -> Publish v2 (`POST /api/workflow-templates/:id/publish`) -> Hủy bản nháp an toàn (`DELETE /api/workflow-templates/:id/draft`).
+    - Concurrency Lock: Trả về `409 CONFLICT` khi phát hiện tranh chấp phát hành đồng thời trên cùng `(workflowTemplateId, versionNumber)`.
+  - **Động cơ Giải quyết Người duyệt Động (Approver Resolution Engine):**
+    - Hỗ trợ 3 loại cấu hình: `SPECIFIC_USERS`, `DEPARTMENT_ROLE` (theo phòng người tạo hoặc phòng chỉ định), `ORGANIZATION_ROLE` (theo chức danh toàn công ty).
+    - Thẩm định trạng thái active và rollback an toàn: Nếu không tìm thấy người duyệt phù hợp hoặc người duyệt bị inactive, hệ thống lập tức từ chối `400 Bad Request` bằng thông báo tiếng Việt rõ ràng và rollback toàn bộ transaction tạo hồ sơ, không sinh ra bước rỗng hay dữ liệu rác.
+    - Hỗ trợ quy tắc hoàn thành bước: `ALL_MUST_APPROVE` (tất cả cùng duyệt) và `ANY_CAN_APPROVE` (1 người duyệt là xong).
+  - **Phân quyền Đa tổ chức (Tenant Boundary):**
+    - ADMIN công ty chỉ được xem và quản trị quy trình của công ty mình hoặc quy trình dùng chung toàn hệ thống (`organizationId: null` do `SUPER_ADMIN` quản lý).
+    - USER thường chỉ được xem và sử dụng các quy trình đã `PUBLISHED`.
+  - **Giao diện Trình thiết kế Quy trình Trực quan (Visual Workflow Builder):**
+    - `/workflows`: Danh sách quy trình kèm bộ lọc trạng thái, tìm kiếm, số bước duyệt và thông tin phiên bản.
+    - `/workflows/new`: Trình thiết kế trực quan cho phép thêm/sửa/xóa bước duyệt, chọn loại người duyệt, cấu hình ALL/ANY và sơ đồ luồng (WorkflowChainPreview) cập nhật thời gian thực.
+    - `/workflows/[id]`: Trang chi tiết quy trình hiển thị banner cảnh báo bản nháp, nút phát hành/hủy bản nháp, sơ đồ luồng và bảng lịch sử phiên bản bất biến.
 
 ## 2. Quyết định kỹ thuật & Kiến trúc (Key Decisions)
-- **Snapshot Phiên bản Mẫu Bất biến (Immutable Form Version Snapshots):**
-  - Khi Admin phát hành (`publish`) một biểu mẫu, một bản ghi `FormTemplateVersion` mới được tạo kèm snapshot toàn bộ trường (`fields`) và layout blocks tại thời điểm đó.
-  - Khi người dùng tạo hồ sơ, trường `templateVersionId` trỏ trực tiếp đến `FormTemplateVersion` cụ thể. Các bản cập nhật sau này (v2, v3) hoặc thao tác Archive hoàn toàn không làm thay đổi hay phá vỡ việc xem lại các hồ sơ lịch sử.
-- **Backend-Driven Dynamic Validation:**
-  - Backend là tầng thẩm định dữ liệu cuối cùng (`validateFormData`). Không tin tưởng validation ở frontend, chặn mọi dữ liệu giả mạo hoặc sai lệch kiểu trước khi ghi nhận vào PostgreSQL.
-- **Multi-Tenant Template Isolation:**
-  - Biểu mẫu có `organizationId`. Người dùng chỉ được truy cập các mẫu thuộc công ty mình hoặc mẫu dùng chung toàn hệ thống (`organizationId: null`). Thao tác biên tập chỉ cho phép `ADMIN` cùng công ty hoặc `SUPER_ADMIN`.
-- **Next.js CSR Prerendering Boundary:**
-  - Toàn bộ trang Next.js App Router sử dụng `useSearchParams()` (như `/documents/new`) bắt buộc phải bọc trong `<React.Suspense>` boundary để tránh lỗi de-opt static build trong Next.js 15.
+- **Immutable Workflow Version Snapshot:**
+  - Snapshot phiên bản quy trình lưu tại `WorkflowTemplateVersion` được chốt bất biến ngay khi xuất bản (`PUBLISHED`). Mọi hồ sơ tạo từ snapshot này tham chiếu qua `Document.workflowTemplateVersionId`.
+- **Foreign Key Restrict Protection:**
+  - Ràng buộc khóa ngoại `onDelete: Restrict` trên cả `Document.templateVersionId` và `Document.workflowTemplateVersionId` đảm bảo toàn vẹn pháp lý, ngăn chặn việc xóa bỏ vô tình các phiên bản snapshot đang phục vụ hồ sơ thực tế.
+- **Fail-Fast Approver Resolution with Rollback:**
+  - Trong quá trình khởi tạo hồ sơ, nếu bất kỳ bước duyệt nào không thể tìm ra người duyệt hợp lệ (ví dụ: phòng ban chưa bổ nhiệm Trưởng phòng, hoặc nhân viên chỉ định đã bị vô hiệu hóa), giao dịch rollback hoàn toàn và báo lỗi rõ ràng về cho người dùng.
+- **Race Condition Prevention in Document Numbering:**
+  - Sinh mã hồ sơ `TK-YYYY-XXXX-RAND` kết hợp hậu tố ngẫu nhiên để triệt tiêu hoàn toàn xung đột trùng khóa Unique khi nhiều request tạo hồ sơ đồng thời tại cùng mili-giây.
 
 ## 3. Nhật ký thay đổi gần nhất (Recent Changes)
+- `[2026-10-22 - Phase 11: Workflow Builder & Versioned Approval Engine]`:
+  - **Files:** `packages/shared/src/workflow-schema.ts`, `packages/shared/src/workflow-schema.spec.ts`, `apps/api/prisma/schema.prisma`, `apps/api/prisma/migrations/20261022130000_add_workflow_template_and_version/migration.sql`, `apps/api/src/modules/workflow-template/*`, `apps/api/src/modules/workflow/workflow-orchestrator.service.ts`, `apps/api/src/modules/workflow/document-workflow.controller.ts`, `apps/api/test/workflow-template-postgresql.integration.spec.ts`, `apps/api/test/e2e-http-live.ts`, `apps/web/src/types/workflow-template.ts`, `apps/web/src/services/api/workflow-template-service.interface.ts`, `apps/web/src/services/api/http-workflow-template-service.ts`, `apps/web/src/services/api/mock-workflow-template-service.ts`, `apps/web/src/services/api/workflow-template-service.spec.ts`, `apps/web/src/components/workflow-builder/*`, `apps/web/src/app/workflows/*`, `docs/API_CONTRACT.md`.
+  - **Kết quả:** 186/186 Unit tests PASS; 44/44 PostgreSQL integration tests PASS; 22/22 Live HTTP E2E tests PASS; Monorepo build PASS 100%.
+- `[2026-10-22 - Phase 10.1: Form Builder Verification & Hardening]`:
+  - **Files:** `packages/shared/src/template-schema.ts`, `packages/shared/src/template-schema.spec.ts`, `apps/api/prisma/schema.prisma`, `apps/api/prisma/migrations/20261022120000_restrict_document_template_version_delete/migration.sql`, `apps/api/src/modules/template/template.service.ts`, `apps/api/src/modules/template/template.controller.ts`, `apps/api/src/modules/workflow/workflow-orchestrator.service.ts`, `apps/api/src/modules/template/template.service.spec.ts`, `apps/api/test/template-postgresql.integration.spec.ts`, `apps/api/test/e2e-http-live.ts`, `apps/web/src/types/template.ts`, `apps/web/src/services/api/template-service.interface.ts`, `apps/web/src/services/api/http-template-service.ts`, `apps/web/src/services/api/mock-template-service.ts`, `apps/web/src/services/api/template-service.spec.ts`, `apps/web/src/app/templates/[id]/page.tsx`, `docs/API_CONTRACT.md`.
+  - **Kết quả:** 153/153 Unit tests PASS; 32/32 PostgreSQL integration tests PASS; 16/16 Live HTTP E2E tests PASS; Monorepo build PASS 100%.
 - `[2026-10-21 - Phase 10: Form Builder & Dynamic Template Engine]`:
-  - **Files:** `packages/shared/src/template-schema.ts`, `packages/shared/src/template-schema.spec.ts`, `apps/api/prisma/schema.prisma`, `apps/api/prisma/migrations/20261021153000_add_form_template_version/*`, `apps/api/src/modules/template/*`, `apps/api/src/modules/workflow/workflow-orchestrator.service.ts`, `apps/api/src/modules/workflow/document-workflow.controller.ts`, `apps/api/test/template-postgresql.integration.spec.ts`, `apps/web/src/types/template.ts`, `apps/web/src/services/api/*`, `apps/web/src/components/form-builder/dynamic-form-renderer.tsx`, `apps/web/src/app/templates/*`, `apps/web/src/app/documents/new/page.tsx`, `apps/web/src/app/documents/[id]/page.tsx`, `docs/API_CONTRACT.md`.
-  - **Kết quả:** 140 Unit tests PASS (31 shared, 75 api, 34 web); 28 PostgreSQL integration tests PASS; Monorepo build PASS 100%.
+  - **Files:** `packages/shared/src/template-schema.ts`, `apps/api/src/modules/template/*`, `apps/web/src/components/form-builder/*`, `apps/web/src/app/templates/*`.
+  - **Kết quả:** 140 Unit tests PASS; 28 PostgreSQL integration tests PASS; Monorepo build PASS 100%.
 - `[2026-10-21 - Phase 9.1: Real PostgreSQL Verification & End-to-End Read API]`:
-  - **Files:** `apps/api/src/modules/workflow/workflow-orchestrator.service.ts`, `apps/api/src/common/filters/workflow-exception.filter.ts`, `apps/api/test/*`, `apps/web/src/app/*`.
+  - **Files:** `apps/api/src/modules/workflow/workflow-orchestrator.service.ts`, `apps/api/test/*`.
   - **Kết quả:** 21/21 PostgreSQL Integration tests PASS; 8/8 Live HTTP tests PASS; 92/92 Unit tests PASS; `pnpm build` PASS.
 - `[2026-10-21 - Phase 9: Secure Read API & Real Frontend Integration]`:
-  - **Files:** `apps/api/src/modules/workflow/document-read.service.ts`, `apps/api/src/modules/auth/*`, `apps/web/src/services/api/http-document-service.ts`.
-- `[2026-10-21 - Phase 8: Frontend Foundation & Workflow Vertical Slice]`:
-  - **Files:** `apps/web/src/types/document.ts`, `apps/web/src/components/*`, `apps/web/src/services/*`, `apps/web/src/app/*`.
-- `[2026-10-21 - Phase 7: PostgreSQL Integration & API Contract Verification]`:
-  - **Files:** `packages/shared/src/workflow-fsm.ts`, `apps/api/src/modules/workflow/workflow-orchestrator.service.ts`.
+  - **Files:** `apps/api/src/modules/workflow/document-read.service.ts`, `apps/web/src/services/api/http-document-service.ts`.

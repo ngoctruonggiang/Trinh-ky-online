@@ -82,6 +82,33 @@ export default function TemplateDetailPage() {
     }
   };
 
+  const handleCreateDraft = async () => {
+    try {
+      setActionLoading(true);
+      await templateService.createDraftVersion(templateId);
+      await loadTemplate();
+    } catch (err: any) {
+      alert(err.message || 'Lỗi khi tạo bản nháp phiên bản tiếp theo.');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleDiscardDraft = async () => {
+    if (!confirm('Bạn có chắc chắn muốn hủy bỏ bản nháp này? Mọi thay đổi chưa xuất bản sẽ bị xóa.')) {
+      return;
+    }
+    try {
+      setActionLoading(true);
+      await templateService.discardDraftVersion(templateId);
+      await loadTemplate();
+    } catch (err: any) {
+      alert(err.message || 'Lỗi khi hủy bản nháp.');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="py-24 text-center">
@@ -165,13 +192,42 @@ export default function TemplateDetailPage() {
 
           {/* Action Buttons */}
           <div className="flex flex-wrap items-center gap-2">
-            {template.status !== 'ARCHIVED' && (
+            {template.status === 'DRAFT' && (
               <button
                 onClick={() => setShowPublishModal(true)}
                 disabled={actionLoading}
                 className="px-3.5 py-2 rounded-lg bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700 transition-colors shadow-xs disabled:opacity-50"
               >
-                {template.status === 'DRAFT' ? 'Phát hành (Publish)' : 'Phát hành phiên bản mới'}
+                Phát hành v1
+              </button>
+            )}
+
+            {template.status === 'PUBLISHED' && template.hasDraft && (
+              <>
+                <button
+                  onClick={() => setShowPublishModal(true)}
+                  disabled={actionLoading}
+                  className="px-3.5 py-2 rounded-lg bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700 transition-colors shadow-xs disabled:opacity-50"
+                >
+                  Phát hành v{template.draftVersion?.versionNumber || template.currentVersion + 1}
+                </button>
+                <button
+                  onClick={handleDiscardDraft}
+                  disabled={actionLoading}
+                  className="px-3 py-2 rounded-lg border border-rose-300 text-rose-600 text-xs font-semibold hover:bg-rose-50 transition-colors disabled:opacity-50"
+                >
+                  Hủy bản nháp
+                </button>
+              </>
+            )}
+
+            {template.status === 'PUBLISHED' && !template.hasDraft && (
+              <button
+                onClick={handleCreateDraft}
+                disabled={actionLoading}
+                className="px-3.5 py-2 rounded-lg bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700 transition-colors shadow-xs disabled:opacity-50"
+              >
+                + Tạo bản nháp phiên bản tiếp theo
               </button>
             )}
 
@@ -195,6 +251,29 @@ export default function TemplateDetailPage() {
             )}
           </div>
         </div>
+
+        {/* Draft Notice Banner if hasDraft is true */}
+        {template.status === 'PUBLISHED' && template.hasDraft && (
+          <div className="mt-3 p-4 rounded-xl border border-amber-200 bg-amber-50/80 flex items-start justify-between gap-3 shadow-xs">
+            <div className="flex items-start gap-2.5">
+              <Clock className="w-4 h-4 text-amber-600 mt-0.5 shrink-0" />
+              <div>
+                <h4 className="text-xs font-bold text-amber-900">
+                  Đang có bản nháp chuẩn bị cho Phiên bản v{template.draftVersion?.versionNumber || template.currentVersion + 1}
+                </h4>
+                <p className="text-2xs text-amber-700 mt-0.5">
+                  Snapshot v{template.currentVersion} vẫn đang được phục vụ người dùng tạo hồ sơ mà không bị ảnh hưởng. Bản nháp này sẽ chỉ có hiệu lực khi bạn xác nhận phát hành.
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={() => setShowPublishModal(true)}
+              className="shrink-0 px-3 py-1.5 rounded-lg bg-amber-600 text-white text-2xs font-bold hover:bg-amber-700 transition-colors"
+            >
+              Phát hành ngay
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Grid: Fields List & Version History */}

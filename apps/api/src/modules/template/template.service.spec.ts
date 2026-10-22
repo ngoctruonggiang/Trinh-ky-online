@@ -71,6 +71,10 @@ describe('TemplateService (Form Builder & Dynamic Template Engine)', () => {
       },
       formTemplateVersion: {
         create: vi.fn(),
+        findFirst: vi.fn(),
+        findUnique: vi.fn(),
+        update: vi.fn(),
+        delete: vi.fn(),
       },
       $transaction: vi.fn(async (cb) => cb(mockPrisma)),
     };
@@ -390,6 +394,104 @@ describe('TemplateService (Form Builder & Dynamic Template Engine)', () => {
       );
       expect(res.valid).toBe(true);
       expect(Object.keys(res.errors)).toHaveLength(0);
+    });
+  });
+
+  describe('6. Hardened Authorization & Next Draft Version Lifecycle', () => {
+    it('Chặn ADMIN công ty Alpha sửa hoặc phát hành biểu mẫu dùng chung toàn hệ thống (organizationId: null)', async () => {
+      mockPrisma.formTemplate.findUnique.mockResolvedValue({
+        id: 'tmpl-system',
+        organizationId: null, // Mẫu toàn hệ thống
+        status: TemplateStatus.DRAFT,
+      });
+
+      await expect(
+        service.updateTemplate('tmpl-system', { title: 'Sửa trái phép' }, mockAdminUser)
+      ).rejects.toThrow(ForbiddenException);
+
+      await expect(
+        service.publishTemplate('tmpl-system', {}, mockAdminUser)
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it('SUPER_ADMIN được phép sửa và phát hành biểu mẫu dùng chung toàn hệ thống', async () => {
+      mockPrisma.formTemplate.findUnique.mockResolvedValue({
+        id: 'tmpl-system',
+        organizationId: null,
+        code: 'SYS_FORM',
+        title: 'Mẫu toàn hệ thống',
+        status: TemplateStatus.DRAFT,
+        fields: sampleValidFields,
+        layoutBlocks: [],
+        defaultWorkflowSteps: [],
+      });
+      mockPrisma.formTemplate.update.mockResolvedValue({
+        id: 'tmpl-system',
+        title: 'Mẫu toàn hệ thống đã sửa',
+        status: TemplateStatus.DRAFT,
+        currentVersion: 1,
+      });
+
+      const res = await service.updateTemplate(
+        'tmpl-system',
+        { title: 'Mẫu toàn hệ thống đã sửa' },
+        mockSuperAdmin
+      );
+      expect(res.success).toBe(true);
+    });
+
+    it('Tạo bản nháp phiên bản tiếp theo (v2) từ template đã PUBLISHED', async () => {
+      mockPrisma.formTemplate.findUnique.mockResolvedValue({
+        id: 'tmpl-pub',
+        organizationId: 'org-alpha',
+        code: 'TPL_PUB',
+        title: 'Mẫu công văn',
+        status: TemplateStatus.PUBLISHED,
+        currentVersion: 1,
+        fields: sampleValidFields,
+        layoutBlocks: [],
+        defaultWorkflowSteps: [],
+        versions: [], // chưa có draft dở dang
+      });
+
+      mockPrisma.formTemplateVersion.create.mockResolvedValue({
+        id: 'ver-draft-2',
+        templateId: 'tmpl-pub',
+        versionNumber: 2,
+        title: 'Mẫu công văn',
+        fields: sampleValidFields,
+        layoutBlocks: [],
+        status: TemplateStatus.DRAFT,
+        createdAt: new Date(),
+      });
+
+      const res = await service.createDraftVersion('tmpl-pub', mockAdminUser);
+      expect(res.success).toBe(true);
+      expect(res.data.versionNumber).toBe(2);
+      expect(res.data.status).toBe(TemplateStatus.DRAFT);
+    });
+
+    it('Xung đột tương tranh khi phát hành phiên bản đồng thời ném ConflictException (409)', async () => {
+      mockPrisma.formTemplate.findUnique.mockResolvedValue({
+        id: 'tmpl-race',
+        organizationId: 'org-alpha',
+        code: 'TPL_RACE',
+        title: 'Mẫu tranh chấp',
+        status: TemplateStatus.PUBLISHED,
+        currentVersion: 1,
+        fields: sampleValidFields,
+        versions: [],
+      });
+
+      mockPrisma.formTemplateVersion.findFirst.mockResolvedValue(null);
+      // Giả lập lỗi P2002 do PostgreSQL Unique Constraint vi phạm
+      const p2002Err: any = new Error('Unique constraint failed');
+      p2002Err.code = 'P2002';
+      mockPrisma.formTemplateVersion.create.mockRejectedValue(p2002Err);
+
+      await expect(
+        service.publishTemplate('tmpl-race', {}, mockAdminUser)
+      ).rejects.toThrow(ConflictException);
     });
   });
 });

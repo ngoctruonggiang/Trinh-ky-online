@@ -225,6 +225,54 @@ describe('HttpTemplateService & MockTemplateService Tests', () => {
         code: 'NETWORK_FAILURE',
       });
     });
+
+    it('1.9. createDraftVersion, getDraftVersion, updateDraftVersion, discardDraftVersion gọi đúng /templates/:id/draft', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url: any, opts: any) => {
+        const method = opts?.method || 'GET';
+        if (method === 'POST') {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ success: true, data: { id: 'draft-1', versionNumber: 2, title: 'Draft v2', status: 'DRAFT' } }),
+          } as any;
+        }
+        if (method === 'GET') {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ success: true, data: { id: 'draft-1', versionNumber: 2, title: 'Draft v2', fields: [], status: 'DRAFT', createdAt: new Date().toISOString() } }),
+          } as any;
+        }
+        if (method === 'PUT') {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ success: true, data: { id: 'draft-1', versionNumber: 2, title: 'Draft v2 Updated', status: 'DRAFT' } }),
+          } as any;
+        }
+        if (method === 'DELETE') {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ success: true, message: 'Đã hủy bỏ bản nháp thành công.' }),
+          } as any;
+        }
+        return { ok: false, status: 404 } as any;
+      });
+
+      const draftCreated = await service.createDraftVersion('tpl-1');
+      expect(draftCreated.versionNumber).toBe(2);
+
+      const draftDetail = await service.getDraftVersion('tpl-1');
+      expect(draftDetail.versionNumber).toBe(2);
+
+      const draftUpdated = await service.updateDraftVersion('tpl-1', { title: 'Draft v2 Updated' });
+      expect(draftUpdated.title).toBe('Draft v2 Updated');
+
+      const discardRes = await service.discardDraftVersion('tpl-1');
+      expect(discardRes.message).toContain('thành công');
+      expect(fetchSpy).toHaveBeenCalledTimes(4);
+    });
   });
 
   describe('MockTemplateService (In-memory verification for dev & fallback)', () => {
@@ -326,6 +374,48 @@ describe('HttpTemplateService & MockTemplateService Tests', () => {
       });
       expect(val3.valid).toBe(true);
       expect(Object.keys(val3.errors)).toHaveLength(0);
+    });
+
+    it('2.6. Lifecycle toàn vẹn của MockTemplateService: Tạo DRAFT -> Publish v1 -> Tạo draft v2 -> Sửa draft v2 -> Publish v2 -> v1 không bị ghi đè', async () => {
+      // 1. Tạo template DRAFT
+      const tpl = await mockService.createTemplate({
+        title: 'Mẫu v1 gốc',
+        code: 'TPL-LIFECYCLE',
+        fields: [{ key: 'f1', label: 'Field 1', type: 'text', required: true }],
+      });
+
+      // 2. Publish v1
+      const pub1 = await mockService.publishTemplate(tpl.id, { changeSummary: 'Release v1' });
+      expect(pub1.versionNumber).toBe(1);
+
+      // 3. Tạo draft v2
+      const draft = await mockService.createDraftVersion(tpl.id);
+      expect(draft.versionNumber).toBe(2);
+
+      // 4. Sửa draft v2
+      await mockService.updateDraftVersion(tpl.id, {
+        title: 'Mẫu v2 nâng cấp',
+        fields: [
+          { key: 'f1', label: 'Field 1', type: 'text', required: true },
+          { key: 'f2', label: 'Field 2', type: 'number', required: false },
+        ],
+      });
+
+      // 5. Publish v2
+      const pub2 = await mockService.publishTemplate(tpl.id, { changeSummary: 'Release v2' });
+      expect(pub2.versionNumber).toBe(2);
+
+      // 6. Kiểm tra template hiện tại là v2
+      const updatedTpl = await mockService.getTemplateById(tpl.id);
+      expect(updatedTpl.currentVersion).toBe(2);
+      expect(updatedTpl.title).toBe('Mẫu v2 nâng cấp');
+      expect(updatedTpl.fields).toHaveLength(2);
+
+      // 7. Xác minh snapshot v1 vẫn còn nguyên vẹn trong versions
+      const v1Snapshot = updatedTpl.versions.find((v) => v.versionNumber === 1);
+      expect(v1Snapshot).toBeDefined();
+      expect(v1Snapshot?.fieldCount).toBe(1);
+      expect(v1Snapshot?.title).toBe('Mẫu v1 gốc');
     });
   });
 });
