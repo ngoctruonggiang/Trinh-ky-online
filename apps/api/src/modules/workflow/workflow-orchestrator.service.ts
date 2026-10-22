@@ -1,5 +1,10 @@
 import { createHash } from 'crypto';
-import { PrismaClient, Prisma } from '@prisma/client';
+import { PrismaClient, Prisma, TemplateStatus } from '@prisma/client';
+import {
+  BadRequestException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
 import {
   AssigneeDecision,
   AssigneeRole,
@@ -7,6 +12,10 @@ import {
   DocumentStatus,
   StepStatus,
   WorkflowStatus,
+  UrgencyLevel,
+  validateFormData,
+  FormFieldDefinition,
+  DefaultWorkflowStep,
 } from '@trinh-ky/shared';
 import {
   WorkflowFSM,
@@ -15,6 +24,20 @@ import {
   WorkflowAssignee,
   SignatureRecord,
 } from '@trinh-ky/shared';
+
+export interface CreateDocumentInput {
+  templateId: string;
+  title: string;
+  urgency?: UrgencyLevel;
+  dueDate?: string;
+  formData: Record<string, any>;
+  userId: string;
+  userOrganizationId?: string | null;
+  userDepartmentId?: string | null;
+  userRole?: string;
+  ipAddress?: string;
+  userAgent?: string;
+}
 
 export interface SubmitDocumentInput {
   documentId: string;
@@ -72,7 +95,7 @@ export class WorkflowOrchestratorService {
         completionRule: step.completionRule,
         status: step.status as StepStatus,
         version: step.version,
-        assignees: step.assignees.map((a: any): WorkflowAssignee => ({
+        assignees: (step.assignees || []).map((a: any): WorkflowAssignee => ({
           id: a.id,
           stepId: a.stepId,
           userId: a.userId,
@@ -703,7 +726,12 @@ export class WorkflowOrchestratorService {
         include: {
           workflow: {
             include: {
-              steps: true,
+              steps: {
+                orderBy: { stepOrder: 'asc' },
+                include: {
+                  assignees: true,
+                },
+              },
             },
           },
         },
@@ -775,6 +803,178 @@ export class WorkflowOrchestratorService {
         success: true,
         documentStatus: DocumentStatus.CANCELLED,
         workflowStatus: WorkflowStatus.CANCELLED,
+      };
+    });
+  }
+
+  /**
+   * Tạo hồ sơ mới ở trạng thái DRAFT từ một Template đã Published
+   */
+  async createDocument(input: CreateDocumentInput) {
+    const template = await this.prisma.formTemplate.findUnique({
+      where: { id: input.templateId },
+      include: {
+        versions: {
+          orderBy: { versionNumber: 'desc' },
+          take: 1,
+        },
+        organization: true,
+      },
+    });
+
+    if (!template) {
+      throw new NotFoundException('Không tìm thấy mẫu biểu mẫu được yêu cầu.');
+    }
+
+    // 1. Phân quyền tổ chức (Tenant Check)
+    if (input.userRole !== 'SUPER_ADMIN' && template.organizationId && input.userOrganizationId) {
+      if (template.organizationId !== input.userOrganizationId) {
+        throw new ForbiddenException('Bạn không có quyền tạo hồ sơ từ mẫu của tổ chức khác.');
+      }
+    }
+
+    // 2. Kiểm tra vòng đời: Chỉ cho phép tạo hồ sơ từ template đã PUBLISHED
+    if (template.status !== TemplateStatus.PUBLISHED) {
+      throw new BadRequestException('Chỉ có thể tạo hồ sơ từ mẫu biểu mẫu đã được phát hành (PUBLISHED).');
+    }
+
+    // 3. Lấy schema fields của phiên bản mới nhất và validate formData
+    const latestVersion = template.versions[0];
+    const fields = (latestVersion ? latestVersion.fields : template.fields) as unknown as FormFieldDefinition[];
+    const validationResult = validateFormData(fields, input.formData);
+
+    if (!validationResult.valid) {
+      throw new BadRequestException({
+        message: 'Dữ liệu biểu mẫu không hợp lệ.',
+        errors: validationResult.errors,
+      });
+    }
+
+    // 4. Sinh mã số hồ sơ TK-YYYY-XXXX
+    const count = await this.prisma.document.count();
+    const documentNumber = `TK-${new Date().getFullYear()}-${String(count + 1).padStart(4, '0')}`;
+
+    // 5. Tính SHA-256 hash của formData
+    const sha256Hash = createHash('sha256')
+      .update(JSON.stringify(input.formData || {}))
+      .digest('hex');
+
+    const defaultSteps = (
+      (latestVersion?.defaultWorkflowSteps || template.defaultWorkflowSteps || []) as unknown as DefaultWorkflowStep[]
+    );
+
+    // 6. Thực hiện giao dịch lưu Document, DocumentVersion, Workflow và Steps
+    return this.prisma.$transaction(async (tx) => {
+      // 6.1 Tạo Document
+      const doc = await tx.document.create({
+        data: {
+          documentNumber,
+          title: input.title.trim(),
+          templateId: template.id,
+          templateVersionId: latestVersion?.id || null,
+          status: DocumentStatus.DRAFT,
+          urgency: (input.urgency as any) || UrgencyLevel.NORMAL,
+          dueDate: input.dueDate ? new Date(input.dueDate) : null,
+          currentStepOrder: 1,
+          currentVersion: 1,
+          createdById: input.userId,
+          organizationId: input.userOrganizationId || template.organizationId,
+          departmentId: input.userDepartmentId,
+        },
+      });
+
+      // 6.2 Tạo DocumentVersion v1
+      await tx.documentVersion.create({
+        data: {
+          documentId: doc.id,
+          versionNumber: 1,
+          formData: input.formData,
+          sha256Hash,
+          changeSummary: 'Khởi tạo hồ sơ ban đầu từ biểu mẫu',
+          createdById: input.userId,
+        },
+      });
+
+      // 6.3 Tạo Workflow và Steps
+      const workflow = await tx.approvalWorkflow.create({
+        data: {
+          documentId: doc.id,
+          status: WorkflowStatus.PENDING,
+          currentStepOrder: 1,
+          version: 0,
+        },
+      });
+
+      if (defaultSteps.length > 0) {
+        for (const stepConfig of defaultSteps) {
+          const step = await tx.approvalStep.create({
+            data: {
+              workflowId: workflow.id,
+              stepOrder: stepConfig.stepOrder,
+              stepName: stepConfig.stepName,
+              stepType: (stepConfig.stepType as any) || 'SEQUENTIAL',
+              completionRule: (stepConfig.completionRule as any) || 'ALL_MUST_APPROVE',
+              status: StepStatus.WAITING,
+              version: 0,
+            },
+          });
+
+          // Nếu có danh sách người duyệt mặc định
+          const userIds = stepConfig.defaultUserIds || [];
+          for (const uid of userIds) {
+            await tx.stepAssignee.create({
+              data: {
+                stepId: step.id,
+                userId: uid,
+                role: AssigneeRole.APPROVER,
+                decision: AssigneeDecision.PENDING,
+              },
+            });
+          }
+        }
+      } else {
+        // Mặc định tạo 1 bước duyệt tối thiểu nếu template chưa định cấu hình bước
+        await tx.approvalStep.create({
+          data: {
+            workflowId: workflow.id,
+            stepOrder: 1,
+            stepName: 'Cấp quản lý phê duyệt',
+            stepType: 'SEQUENTIAL',
+            completionRule: 'ALL_MUST_APPROVE',
+            status: StepStatus.WAITING,
+            version: 0,
+          },
+        });
+      }
+
+      // 6.4 Ghi AuditLog
+      await tx.auditLog.create({
+        data: {
+          documentId: doc.id,
+          userId: input.userId,
+          action: 'CREATE_DOCUMENT',
+          details: {
+            documentNumber: doc.documentNumber,
+            title: doc.title,
+            templateId: template.id,
+            templateCode: template.code,
+            templateVersionNumber: latestVersion?.versionNumber || 1,
+            userAgent: input.userAgent,
+          },
+          ipAddress: input.ipAddress,
+        },
+      });
+
+      return {
+        id: doc.id,
+        documentNumber: doc.documentNumber,
+        title: doc.title,
+        status: doc.status,
+        currentVersion: doc.currentVersion,
+        templateId: template.id,
+        templateVersionId: latestVersion?.id || null,
+        templateVersionNumber: latestVersion?.versionNumber || 1,
+        createdAt: doc.createdAt,
       };
     });
   }

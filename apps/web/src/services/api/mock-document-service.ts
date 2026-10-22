@@ -569,6 +569,92 @@ export class MockDocumentService implements IDocumentService {
     doc.updatedAt = new Date().toISOString();
     return { success: true };
   }
+
+  public async createDocument(
+    payload: import('@/types/template').CreateDocumentPayload
+  ): Promise<import('@/types/template').CreatedDocumentResult> {
+    await this.delay(350);
+    const id = `mock-doc-${Date.now()}`;
+    const docNumber = `TK-2026-${String(this.documents.length + 1).padStart(4, '0')}`;
+    const now = new Date().toISOString();
+
+    const newDoc: DocumentDetail = {
+      id,
+      documentNumber: docNumber,
+      title: payload.title,
+      templateCode: 'DYNAMIC_FORM',
+      templateTitle: 'Hồ sơ biểu mẫu',
+      status: DocumentStatus.DRAFT,
+      urgency: (payload.urgency as any) || 'NORMAL',
+      createdById: this.currentUser.id,
+      createdByName: this.currentUser.fullName,
+      organizationId: this.currentUser.organizationId,
+      organizationName: this.currentUser.organizationName,
+      departmentName: this.currentUser.departmentName,
+      currentStepOrder: 1,
+      totalSteps: 1,
+      currentStepName: 'Cấp quản lý duyệt',
+      createdAt: now,
+      updatedAt: now,
+      currentVersion: 1,
+      versions: [
+        {
+          id: `v1-${id}`,
+          versionNumber: 1,
+          formData: payload.formData,
+          sha256Hash: 'mock-sha256-hash',
+          changeSummary: 'Khởi tạo hồ sơ ban đầu',
+          createdAt: now,
+        },
+      ],
+      activeVersion: {
+        id: `v1-${id}`,
+        versionNumber: 1,
+        formData: payload.formData,
+        sha256Hash: 'mock-sha256-hash',
+        changeSummary: 'Khởi tạo hồ sơ ban đầu',
+        createdAt: now,
+      },
+      workflow: {
+        id: `wf-${id}`,
+        status: WorkflowStatus.PENDING,
+        currentStepOrder: 1,
+        steps: [
+          {
+            id: `step-1-${id}`,
+            stepOrder: 1,
+            stepName: 'Cấp quản lý phê duyệt',
+            stepType: StepType.SEQUENTIAL,
+            completionRule: StepCompletionRule.ALL_MUST_APPROVE,
+            status: StepStatus.WAITING,
+            assignees: [],
+          },
+        ],
+      },
+      decisionHistories: [],
+      signatures: [],
+      permissions: {
+        canApprove: false,
+        canResubmit: false,
+        canCancel: true,
+        isCreator: true,
+        isAdmin: true,
+      },
+    };
+
+    this.documents.unshift(newDoc);
+
+    return {
+      id,
+      documentNumber: docNumber,
+      title: newDoc.title,
+      status: newDoc.status,
+      currentVersion: 1,
+      templateId: payload.templateId,
+      templateVersionNumber: 1,
+      createdAt: now,
+    };
+  }
 }
 
 export const mockDocumentService = new MockDocumentService();

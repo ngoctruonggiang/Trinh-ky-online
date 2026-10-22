@@ -24,6 +24,7 @@ import { PrismaService } from '../../common/prisma/prisma.service.js';
 import { WorkflowOrchestratorService } from './workflow-orchestrator.service.js';
 import { DocumentReadService } from './document-read.service.js';
 import { GetDocumentsQueryDto } from './dto/get-documents-query.dto.js';
+import { CreateDocumentDto } from './dto/create-document.dto.js';
 import { ProcessDecisionDto } from './dto/process-decision.dto.js';
 import { ResubmitDocumentDto } from './dto/resubmit-document.dto.js';
 import { CancelDocumentDto } from './dto/cancel-document.dto.js';
@@ -44,6 +45,37 @@ export class DocumentWorkflowController {
     private readonly prisma: PrismaService,
     private readonly readService: DocumentReadService
   ) {}
+
+  /**
+   * Endpoint Khởi tạo hồ sơ mới từ mẫu biểu (POST /api/documents)
+   */
+  @Post()
+  @HttpCode(HttpStatus.CREATED)
+  async createDocument(
+    @Body() dto: CreateDocumentDto,
+    @CurrentUser() user: UserPrincipal,
+    @Req() req: HttpRequest
+  ) {
+    const result = await this.orchestrator.createDocument({
+      templateId: dto.templateId,
+      title: dto.title,
+      urgency: dto.urgency,
+      dueDate: dto.dueDate,
+      formData: dto.formData,
+      userId: user.id,
+      userOrganizationId: user.organizationId,
+      userDepartmentId: user.departmentId,
+      userRole: user.role,
+      ipAddress: req.ip,
+      userAgent: typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : undefined,
+    });
+
+    return {
+      success: true,
+      data: result,
+      timestamp: new Date().toISOString(),
+    };
+  }
 
   /**
    * Endpoint 1: Lấy danh sách hồ sơ trình ký (GET /api/documents)

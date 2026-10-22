@@ -89,13 +89,13 @@ export class WorkflowExceptionFilter implements ExceptionFilter {
       case HttpStatus.FORBIDDEN:
         return 'FORBIDDEN';
       case HttpStatus.NOT_FOUND:
-        return 'NOT_FOUND';
+        return 'DOCUMENT_NOT_FOUND';
       case HttpStatus.CONFLICT:
         return 'CONCURRENCY_CONFLICT';
       case HttpStatus.UNPROCESSABLE_ENTITY:
         return 'INVALID_STATE_TRANSITION';
       default:
-        return 'INTERNAL_SERVER_ERROR';
+        return 'INTERNAL_ERROR';
     }
   }
 }

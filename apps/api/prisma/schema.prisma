@@ -30,6 +30,7 @@ model Organization {
   departments  Department[]
   users        User[]
   documents    Document[]
+  templates    FormTemplate[]
 
   @@map("organizations")
 }
@@ -67,13 +68,14 @@ model User {
   organization   Organization? @relation(fields: [organizationId], references: [id])
   department     Department?   @relation(fields: [departmentId], references: [id])
 
-  createdTemplates  FormTemplate[]
-  createdDocuments  Document[]          @relation("DocumentCreator")
-  assignedSteps     StepAssignee[]
-  signatures        SignatureEvent[]
-  comments          DocumentComment[]
-  auditLogs         AuditLog[]
-  decisionHistories StepDecisionHistory[]
+  createdTemplates        FormTemplate[]
+  createdTemplateVersions FormTemplateVersion[]
+  createdDocuments        Document[]          @relation("DocumentCreator")
+  assignedSteps           StepAssignee[]
+  signatures              SignatureEvent[]
+  comments                DocumentComment[]
+  auditLogs               AuditLog[]
+  decisionHistories       StepDecisionHistory[]
 
   @@map("users")
 }
@@ -90,13 +92,15 @@ enum TemplateStatus {
 
 model FormTemplate {
   id                   String         @id @default(uuid())
+  organizationId       String?        // null: Mẫu dùng chung toàn hệ thống (SUPER_ADMIN)
   code                 String         @unique // VD: TAM_UNG, NGHI_PHEP
   title                String         // VD: Giấy đề nghị tạm ứng
   description          String?
   category             String         @default("Hành chính - Nhân sự")
   status               TemplateStatus @default(DRAFT)
+  currentVersion       Int            @default(1)
   
-  // JSON chứa danh sách field nhập liệu: id, name, label, type, required, options, columns...
+  // JSON chứa danh sách field nhập liệu: id, key, label, type, required, options, validation, order...
   fields               Json
   // JSON chứa danh sách các Layout Block hiển thị tài liệu/PDF: header, text, grid, table, signature...
   layoutBlocks         Json
@@ -107,10 +111,34 @@ model FormTemplate {
   createdAt            DateTime       @default(now())
   updatedAt            DateTime       @updatedAt
 
+  organization         Organization?  @relation(fields: [organizationId], references: [id], onDelete: SetNull)
   createdBy            User           @relation(fields: [createdById], references: [id])
+  versions             FormTemplateVersion[]
   documents            Document[]
 
   @@map("form_templates")
+}
+
+model FormTemplateVersion {
+  id                   String         @id @default(uuid())
+  templateId           String
+  versionNumber        Int
+  title                String
+  description          String?
+  fields               Json
+  layoutBlocks         Json
+  defaultWorkflowSteps Json?
+  changeSummary        String?
+  status               TemplateStatus @default(PUBLISHED)
+  createdById          String
+  createdAt            DateTime       @default(now())
+
+  template             FormTemplate   @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  createdByUser        User           @relation(fields: [createdById], references: [id])
+  documents            Document[]
+
+  @@unique([templateId, versionNumber])
+  @@map("form_template_versions")
 }
 
 // -------------------------------------------------------------
@@ -139,6 +167,7 @@ model Document {
   documentNumber    String         @unique // Mã số tự tăng: VD: TK-2026-0001
   title             String         // Tiêu đề hồ sơ
   templateId        String
+  templateVersionId String?        // Phiên bản cụ thể của biểu mẫu tại thời điểm tạo
   status            DocumentStatus @default(DRAFT)
   urgency           UrgencyLevel   @default(NORMAL)
   dueDate           DateTime?      // Hạn hoàn tất xử lý
@@ -151,10 +180,11 @@ model Document {
   createdAt         DateTime       @default(now())
   updatedAt         DateTime       @updatedAt
 
-  template          FormTemplate   @relation(fields: [templateId], references: [id])
-  createdBy         User           @relation("DocumentCreator", fields: [createdById], references: [id])
-  organization      Organization?  @relation(fields: [organizationId], references: [id])
-  department        Department?    @relation(fields: [departmentId], references: [id])
+  template          FormTemplate         @relation(fields: [templateId], references: [id])
+  templateVersion   FormTemplateVersion? @relation(fields: [templateVersionId], references: [id])
+  createdBy         User                 @relation("DocumentCreator", fields: [createdById], references: [id])
+  organization      Organization?        @relation(fields: [organizationId], references: [id])
+  department        Department?          @relation(fields: [departmentId], references: [id])
 
   versions          DocumentVersion[]
   attachments       DocumentAttachment[]

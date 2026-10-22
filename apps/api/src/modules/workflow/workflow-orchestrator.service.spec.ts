@@ -22,20 +22,28 @@ describe('WorkflowOrchestratorService (Điều phối Transaction, Concurrency &
       }),
       document: {
         findUnique: vi.fn(),
+        create: vi.fn(),
         update: vi.fn(),
+        count: vi.fn().mockResolvedValue(10),
+      },
+      formTemplate: {
+        findUnique: vi.fn(),
       },
       approvalWorkflow: {
+        create: vi.fn().mockResolvedValue({ id: 'wf-new' }),
         update: vi.fn(),
       },
       approvalStep: {
+        create: vi.fn().mockResolvedValue({ id: 'step-new' }),
         update: vi.fn(),
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
       stepAssignee: {
+        create: vi.fn().mockResolvedValue({ id: 'assignee-new' }),
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
       documentVersion: {
-        create: vi.fn(),
+        create: vi.fn().mockResolvedValue({ id: 'v1' }),
       },
       stepDecisionHistory: {
         create: vi.fn(),
@@ -502,5 +510,129 @@ describe('WorkflowOrchestratorService (Điều phối Transaction, Concurrency &
 
     expect(res.success).toBe(true);
     expect(res.documentStatus).toBe(DocumentStatus.CANCELLED);
+  });
+
+  describe('createDocument (Tạo hồ sơ DRAFT từ Template đã Published)', () => {
+    const publishedTemplate = {
+      id: 'tmpl-01',
+      code: 'TAM_UNG',
+      title: 'Giấy đề nghị tạm ứng',
+      status: 'PUBLISHED',
+      organizationId: 'org-alpha',
+      fields: [
+        { id: '1', key: 'so_tien', label: 'Số tiền', type: 'number', required: true, order: 1 },
+        { id: '2', key: 'ly_do', label: 'Lý do', type: 'text', required: true, order: 2 },
+      ],
+      defaultWorkflowSteps: [
+        {
+          stepOrder: 1,
+          stepName: 'Trưởng phòng duyệt',
+          stepType: 'SEQUENTIAL',
+          completionRule: 'ALL_MUST_APPROVE',
+          defaultUserIds: ['user-tp-01'],
+        },
+      ],
+      versions: [
+        {
+          id: 'ver-01',
+          versionNumber: 1,
+          fields: [
+            { id: '1', key: 'so_tien', label: 'Số tiền', type: 'number', required: true, order: 1 },
+            { id: '2', key: 'ly_do', label: 'Lý do', type: 'text', required: true, order: 2 },
+          ],
+        },
+      ],
+    };
+
+    it('12. Tạo hồ sơ thành công ở trạng thái DRAFT v1 với formData hợp lệ', async () => {
+      mockPrisma.formTemplate.findUnique.mockResolvedValue(publishedTemplate);
+      mockPrisma.document.create.mockResolvedValue({
+        id: 'new-doc-id',
+        documentNumber: 'TK-2026-0011',
+        title: 'Đề xuất tạm ứng công tác',
+        status: DocumentStatus.DRAFT,
+        currentVersion: 1,
+        createdAt: new Date(),
+      });
+
+      const res = await orchestrator.createDocument({
+        templateId: 'tmpl-01',
+        title: 'Đề xuất tạm ứng công tác',
+        formData: { so_tien: 3000000, ly_do: 'Đi công tác Hải Phòng' },
+        userId: 'emp-01',
+        userOrganizationId: 'org-alpha',
+      });
+
+      expect(res.id).toBe('new-doc-id');
+      expect(res.status).toBe(DocumentStatus.DRAFT);
+      expect(res.templateVersionNumber).toBe(1);
+      expect(mockPrisma.document.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            status: DocumentStatus.DRAFT,
+            templateId: 'tmpl-01',
+            templateVersionId: 'ver-01',
+          }),
+        })
+      );
+    });
+
+    it('13. Báo lỗi 404 nếu templateId không tồn tại', async () => {
+      mockPrisma.formTemplate.findUnique.mockResolvedValue(null);
+
+      await expect(
+        orchestrator.createDocument({
+          templateId: 'non-existent',
+          title: 'Hồ sơ',
+          formData: {},
+          userId: 'emp-01',
+        })
+      ).rejects.toThrow();
+    });
+
+    it('14. Chặn tạo hồ sơ nếu template chưa PUBLISHED (đang DRAFT hoặc ARCHIVED)', async () => {
+      const draftTemplate = { ...publishedTemplate, status: 'DRAFT' };
+      mockPrisma.formTemplate.findUnique.mockResolvedValue(draftTemplate);
+
+      await expect(
+        orchestrator.createDocument({
+          templateId: 'tmpl-01',
+          title: 'Hồ sơ',
+          formData: { so_tien: 1000, ly_do: 'test' },
+          userId: 'emp-01',
+          userOrganizationId: 'org-alpha',
+        })
+      ).rejects.toThrow();
+    });
+
+    it('15. Chặn tạo hồ sơ nếu formData thiếu trường bắt buộc', async () => {
+      mockPrisma.formTemplate.findUnique.mockResolvedValue(publishedTemplate);
+
+      await expect(
+        orchestrator.createDocument({
+          templateId: 'tmpl-01',
+          title: 'Hồ sơ',
+          formData: { so_tien: 1000 }, // thiếu ly_do
+          userId: 'emp-01',
+          userOrganizationId: 'org-alpha',
+        })
+      ).rejects.toThrow();
+    });
+
+    it('16. Chặn người dùng công ty Alpha tạo hồ sơ từ template của công ty Beta', async () => {
+      const betaTemplate = { ...publishedTemplate, organizationId: 'org-beta' };
+      mockPrisma.formTemplate.findUnique.mockResolvedValue(betaTemplate);
+
+      await expect(
+        orchestrator.createDocument({
+          templateId: 'tmpl-01',
+          title: 'Hồ sơ',
+          formData: { so_tien: 1000, ly_do: 'test' },
+          userId: 'emp-01',
+          userOrganizationId: 'org-alpha',
+          userRole: 'USER',
+        })
+      ).rejects.toThrow();
+    });
   });
 });

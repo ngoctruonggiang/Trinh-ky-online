@@ -101,11 +101,19 @@ function DocumentListContent() {
             </h1>
             {isMockMode ? (
               <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-amber-50 text-amber-700 border border-amber-200">
-                Chế độ Thử nghiệm (Mock)
+                Chế độ Thử nghiệm (Mock Data)
+              </span>
+            ) : fetchError ? (
+              <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-rose-50 text-rose-700 border border-rose-200">
+                API Thật (Lỗi kết nối)
+              </span>
+            ) : loading ? (
+              <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-slate-100 text-slate-700 border border-slate-200">
+                API Thật (Đang kết nối...)
               </span>
             ) : (
               <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-emerald-50 text-emerald-700 border border-emerald-200">
-                API Thật (Connected)
+                API Thật (Đã kết nối)
               </span>
             )}
           </div>
@@ -114,13 +122,14 @@ function DocumentListContent() {
           </p>
         </div>
 
-        <Button
-          variant="primary"
-          icon={<Plus className="w-4 h-4" />}
-          onClick={() => alert('Chức năng tạo hồ sơ mới từ biểu mẫu động sẽ hoàn thiện ở bước tiếp theo!')}
-        >
-          Tạo hồ sơ mới
-        </Button>
+        <Link href="/documents/new">
+          <Button
+            variant="primary"
+            icon={<Plus className="w-4 h-4" />}
+          >
+            Tạo hồ sơ mới
+          </Button>
+        </Link>
       </div>
 
       {/* Error state alert */}

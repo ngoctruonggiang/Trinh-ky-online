@@ -125,17 +125,38 @@ export default function DocumentDetailPage({
 
   if (!document) {
     return (
-      <div className="py-20 text-center">
-        <h2 className="text-base font-bold text-slate-800">Không tìm thấy hồ sơ</h2>
-        <p className="text-xs text-slate-500 mt-1 mb-4">
-          Hồ sơ có thể đã bị xóa hoặc bạn không có quyền truy cập.
+      <div className="py-20 text-center max-w-lg mx-auto px-4">
+        <div className="mb-3">
+          {isMockMode ? (
+            <span className="text-2xs font-medium px-2 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">
+              Chế độ Thử nghiệm (Mock Data)
+            </span>
+          ) : (
+            <span className="text-2xs font-medium px-2 py-0.5 rounded bg-rose-50 text-rose-700 border border-rose-200">
+              API Thật (Lỗi kết nối / Không tải được)
+            </span>
+          )}
+        </div>
+        <h2 className="text-base font-bold text-slate-800">
+          {errorMessage ? 'Không thể mở hồ sơ' : 'Không tìm thấy hồ sơ'}
+        </h2>
+        <p className="text-xs text-slate-500 mt-2 mb-5 leading-relaxed">
+          {errorMessage || 'Hồ sơ có thể đã bị xóa hoặc bạn không có quyền truy cập.'}
         </p>
-        <Link
-          href="/"
-          className="text-xs font-semibold text-blue-600 hover:text-blue-800"
-        >
-          ← Quay lại danh sách
-        </Link>
+        <div className="flex items-center justify-center gap-3">
+          <button
+            onClick={loadDocument}
+            className="text-xs px-3 py-1.5 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700 transition-colors shadow-xs"
+          >
+            Thử lại
+          </button>
+          <Link
+            href="/"
+            className="text-xs px-3 py-1.5 rounded-lg border border-slate-200 text-slate-700 font-medium hover:bg-slate-50 transition-colors"
+          >
+            ← Quay lại danh sách
+          </Link>
+        </div>
       </div>
     );
   }
@@ -167,11 +188,11 @@ export default function DocumentDetailPage({
               </span>
               {isMockMode ? (
                 <span className="text-2xs font-medium px-2 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">
-                  Giả lập (Mock)
+                  Chế độ Thử nghiệm (Mock Data)
                 </span>
               ) : (
                 <span className="text-2xs font-medium px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">
-                  API Thật
+                  API Thật (Đã kết nối)
                 </span>
               )}
             </div>
@@ -287,6 +308,37 @@ export default function DocumentDetailPage({
                   </div>
                 </div>
               )}
+
+              {/* Các trường dữ liệu biểu mẫu động (Dynamic Template Fields) */}
+              {(() => {
+                const legacyKeys = new Set(['employeeName', 'department', 'advanceAmount', 'amount', 'reimbursementDeadline', 'reason', 'breakdown']);
+                const dynamicFields = Object.entries(formData).filter(([k]) => !legacyKeys.has(k));
+                if (dynamicFields.length === 0) return null;
+                return (
+                  <div className="pt-4 border-t border-slate-100 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <label className="text-slate-400 text-2xs block uppercase font-semibold">Trường dữ liệu mẫu động</label>
+                      <span className="text-2xs text-slate-400 font-mono">{dynamicFields.length} trường</span>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      {dynamicFields.map(([fieldKey, val]) => (
+                        <div key={fieldKey} className="bg-slate-50/80 p-3 rounded-lg border border-slate-200/60">
+                          <span className="text-slate-400 text-2xs block uppercase font-mono tracking-wider mb-0.5">{fieldKey}</span>
+                          <span className="font-semibold text-slate-800 text-xs break-words">
+                            {typeof val === 'boolean'
+                              ? (val ? 'Đồng ý / Có' : 'Không')
+                              : typeof val === 'number'
+                                ? val.toLocaleString('vi-VN')
+                                : typeof val === 'object' && val !== null
+                                  ? JSON.stringify(val)
+                                  : String(val !== undefined && val !== null && val !== '' ? val : '—')}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
           </div>
 

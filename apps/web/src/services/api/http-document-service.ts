@@ -11,6 +11,7 @@ import {
   ResubmitPayload,
   UserProfile,
 } from '@/types/document';
+import { CreateDocumentPayload, CreatedDocumentResult } from '@/types/template';
 
 export interface HttpServiceConfig {
   baseUrl?: string;
@@ -257,5 +258,17 @@ export class HttpDocumentService implements IDocumentService {
     return {
       success: result.success,
     };
+  }
+
+  /**
+   * Tạo hồ sơ mới từ biểu mẫu (POST /api/documents)
+   */
+  public async createDocument(
+    payload: CreateDocumentPayload
+  ): Promise<CreatedDocumentResult> {
+    return this.request<CreatedDocumentResult>('/documents', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
   }
 }

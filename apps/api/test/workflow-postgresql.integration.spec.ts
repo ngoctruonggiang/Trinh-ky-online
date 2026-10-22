@@ -218,9 +218,52 @@ describe('Workflow PostgreSQL Real Integration Tests (Database Thật)', () => {
   });
 
   runIfDb('3. Ghi quyết định, StepDecisionHistory, SignatureEvent và AuditLog đồng thời trong Transaction', async () => {
+    const user = await prisma.user.findFirstOrThrow({ where: { email: 'author-a@company.com' } });
     const approver = await prisma.user.findFirstOrThrow({ where: { email: 'approver-a1@company.com' } });
-    const doc = await prisma.document.findFirstOrThrow({
-      where: { status: DocumentStatus.IN_REVIEW },
+    const template = await prisma.formTemplate.findFirstOrThrow();
+
+    const doc = await prisma.document.create({
+      data: {
+        documentNumber: `TK-DECISION-${Date.now()}`,
+        title: 'Hồ sơ thử nghiệm quyết định duyệt',
+        templateId: template.id,
+        createdById: user.id,
+        organizationId: user.organizationId,
+        status: DocumentStatus.IN_REVIEW,
+        currentVersion: 1,
+        versions: {
+          create: {
+            versionNumber: 1,
+            formData: { amount: 3000000 },
+            sha256Hash: orchestrator.computeContentHash({ amount: 3000000 }),
+            createdById: user.id,
+          },
+        },
+        workflow: {
+          create: {
+            status: WorkflowStatus.RUNNING,
+            currentStepOrder: 1,
+            steps: {
+              create: [
+                {
+                  stepOrder: 1,
+                  stepName: 'Trưởng bộ phận phê duyệt',
+                  stepType: StepType.SEQUENTIAL,
+                  completionRule: StepCompletionRule.ALL_MUST_APPROVE,
+                  status: StepStatus.IN_PROGRESS,
+                  assignees: {
+                    create: {
+                      userId: approver.id,
+                      role: AssigneeRole.APPROVER,
+                      decision: AssigneeDecision.PENDING,
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      },
       include: { versions: true },
     });
 

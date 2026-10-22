@@ -51,6 +51,16 @@ export function Sidebar() {
 
       {/* Navigation */}
       <div className="flex-1 py-6 px-3 space-y-1">
+        {/* Quick Action: New Document */}
+        <div className="px-2 mb-4">
+          <Link
+            href="/documents/new"
+            className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold shadow-md shadow-blue-500/20 transition-all"
+          >
+            <span>+ Tạo hồ sơ mới</span>
+          </Link>
+        </div>
+
         <div className="px-3 mb-2 text-2xs font-semibold text-slate-500 uppercase tracking-wider">
           Quản lý quy trình
         </div>
@@ -84,10 +94,17 @@ export function Sidebar() {
         <div className="pt-6 px-3 mb-2 text-2xs font-semibold text-slate-500 uppercase tracking-wider">
           Quản trị hệ thống
         </div>
-        <div className="flex items-center gap-3 px-3 py-2 text-xs text-slate-500 cursor-not-allowed">
+        <Link
+          href="/templates"
+          className={`flex items-center gap-3 px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
+            pathname.startsWith('/templates')
+              ? 'bg-blue-600/15 text-blue-400 font-semibold border border-blue-500/20'
+              : 'text-slate-300 hover:bg-slate-800/60 hover:text-white'
+          }`}
+        >
           <SlidersHorizontal className="w-4 h-4 shrink-0" />
-          <span>Biểu mẫu & FSM (Sắp ra mắt)</span>
-        </div>
+          <span>Quản lý Biểu mẫu</span>
+        </Link>
       </div>
 
       {/* Bottom Company Info */}

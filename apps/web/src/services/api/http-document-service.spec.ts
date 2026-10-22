@@ -139,6 +139,42 @@ describe('HttpDocumentService (API Adapter & Error Handling)', () => {
       );
       expect(result.documentStatus).toBe(DocumentStatus.APPROVED);
     });
+
+    it('1.5. createDocument gửi đúng payload templateId, title, formData tới POST /documents', async () => {
+      const mockCreated = {
+        id: 'doc-new-1',
+        documentNumber: 'TK-20261021-0001',
+        title: 'Đề xuất mua sắm thiết bị',
+        status: DocumentStatus.DRAFT,
+      };
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true,
+        status: 201,
+        json: async () => ({
+          success: true,
+          data: mockCreated,
+        }),
+      } as any);
+
+      const payload = {
+        templateId: 'tpl-1',
+        title: 'Đề xuất mua sắm thiết bị',
+        formData: { employeeName: 'Nguyễn Văn A', amount: 5000000 },
+      };
+
+      const result = await service.createDocument(payload);
+
+      expect(fetchSpy).toHaveBeenCalledWith(
+        'http://api.test/api/documents',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify(payload),
+        })
+      );
+      expect(result.id).toBe('doc-new-1');
+      expect(result.documentNumber).toBe('TK-20261021-0001');
+    });
   });
 
   describe('2. Xử lý lỗi HTTP & Chuẩn hóa mã lỗi (Error Handling)', () => {

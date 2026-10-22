@@ -197,5 +197,8 @@ export interface IDocumentService {
     id: string,
     payload: CancelPayload
   ): Promise<{ success: boolean }>;
+  createDocument?(
+    payload: import('./template.js').CreateDocumentPayload
+  ): Promise<import('./template.js').CreatedDocumentResult>;
 }
 
