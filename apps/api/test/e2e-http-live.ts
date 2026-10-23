@@ -612,10 +612,324 @@ async function runLiveTests() {
   }
   console.log('   -> PASS (Chặn tạo hồ sơ từ quy trình chưa phát hành an toàn)\n');
 
+  // Test 23: Gửi duyệt hồ sơ qua Live HTTP (POST /api/documents/:id/submit) -> 200 OK
+  console.log(`23. Test gửi duyệt hồ sơ live HTTP (${createdDocWithWf.id}):`);
+  const resSubmitDoc = await fetch(`${API_BASE}/documents/${createdDocWithWf.id}/submit`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenUserA}`,
+      'Content-Type': 'application/json',
+    },
+  });
+  const bodySubmitDoc = await resSubmitDoc.json();
+  console.log(`   HTTP Status: ${resSubmitDoc.status} | DocumentStatus: ${bodySubmitDoc.data?.documentStatus}`);
+  if (!resSubmitDoc.ok || bodySubmitDoc.data?.documentStatus !== 'IN_REVIEW') {
+    throw new Error('Test 23 thất bại: Gửi duyệt hồ sơ không thành công');
+  }
+  console.log('   -> PASS (Gửi duyệt hồ sơ thành công, trạng thái chuyển IN_REVIEW)\n');
+
+  // Test 24: Người dùng không được phân công cố tình gửi quyết định -> 403/400
+  console.log('24. Test người dùng không thuộc danh sách duyệt gửi quyết định:');
+  const resDecForbidden = await fetch(`${API_BASE}/documents/${createdDocWithWf.id}/decision`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenUserB}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      decision: 'APPROVED',
+      decisionComment: 'User B duyệt lậu',
+    }),
+  });
+  console.log(`   HTTP Status: ${resDecForbidden.status}`);
+  if (resDecForbidden.status !== 403 && resDecForbidden.status !== 400) {
+    throw new Error(`Test 24 thất bại: Kỳ vọng 403/400 nhưng nhận ${resDecForbidden.status}`);
+  }
+  console.log('   -> PASS (Chặn quyết định trái phép từ người dùng khác thành công)\n');
+
+  // Test 25: Người duyệt hợp lệ (userA) phê duyệt qua Live HTTP -> 200 OK
+  console.log(`25. Test người duyệt hợp lệ gửi quyết định APPROVED qua Live HTTP:`);
+  const resDecApprove = await fetch(`${API_BASE}/documents/${createdDocWithWf.id}/decision`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenUserA}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      decision: 'APPROVED',
+      decisionComment: 'Người duyệt 1 đồng ý hợp lệ',
+      signatureImageUrl: '/signatures/userA.png',
+    }),
+  });
+  const bodyDecApprove = await resDecApprove.json();
+  console.log(`   HTTP Status: ${resDecApprove.status} | WorkflowStatus: ${bodyDecApprove.data?.workflowStatus}`);
+  if (!resDecApprove.ok || !bodyDecApprove.success) {
+    throw new Error('Test 25 thất bại: Người duyệt hợp lệ không phê duyệt được');
+  }
+  console.log('   -> PASS (Phê duyệt bước 1 thành công, ghi nhận chữ ký)\n');
+
+  // Test 26: Gửi lại quyết định trùng lặp trên cùng bước -> 409 Conflict hoặc 400 Bad Request
+  console.log('26. Test gửi quyết định trùng lặp qua Live HTTP:');
+  const resDecDup = await fetch(`${API_BASE}/documents/${createdDocWithWf.id}/decision`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenUserA}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      decision: 'APPROVED',
+      decisionComment: 'Duyệt lần 2',
+    }),
+  });
+  console.log(`   HTTP Status: ${resDecDup.status}`);
+  if (resDecDup.status !== 409 && resDecDup.status !== 400 && resDecDup.status !== 403) {
+    throw new Error(`Test 26 thất bại: Không chặn quyết định trùng lặp (nhận ${resDecDup.status})`);
+  }
+  console.log('   -> PASS (Chặn quyết định trùng lặp trên Live HTTP thành công)\n');
+
+  // =========================================================================
+  // PHASE 12: ADVANCED APPROVAL FEATURES, REASSIGNMENT, SLA & NOTIFICATIONS
+  // =========================================================================
+
+  // Tìm hoặc tạo thêm 1 user mới trong Công ty Alpha làm người nhận chuyển giao
+  let newApproverAlpha = await prisma.user.findFirst({
+    where: { email: 'new-approver-alpha@vinagroup.vn' },
+  });
+  if (!newApproverAlpha) {
+    newApproverAlpha = await prisma.user.create({
+      data: {
+        email: 'new-approver-alpha@vinagroup.vn',
+        passwordHash: 'hashed_pw',
+        fullName: 'Người duyệt mới Alpha',
+        role: UserRole.USER,
+        organizationId: userA.organizationId,
+        isActive: true,
+      },
+    });
+  }
+
+  const tokenNewApprover = JwtUtil.sign(
+    {
+      sub: newApproverAlpha.id,
+      email: newApproverAlpha.email,
+      fullName: newApproverAlpha.fullName,
+      role: newApproverAlpha.role,
+      organizationId: newApproverAlpha.organizationId,
+    },
+    JWT_SECRET,
+    3600
+  );
+
+  const adminAlphaUser = await prisma.user.findFirstOrThrow({
+    where: { email: 'admin-alpha@vinagroup.vn' },
+  });
+  const tokenAdminAlpha = JwtUtil.sign(
+    {
+      sub: adminAlphaUser.id,
+      email: adminAlphaUser.email,
+      fullName: adminAlphaUser.fullName,
+      role: adminAlphaUser.role,
+      organizationId: adminAlphaUser.organizationId,
+    },
+    JWT_SECRET,
+    3600
+  );
+
+  const inactiveUser = await prisma.user.findFirstOrThrow({
+    where: { email: 'inactive.wf@vinagroup.vn' },
+  });
+
+  // Tạo hồ sơ mới để test Phase 12 Reassignment & SLA
+  console.log('27. Test tạo hồ sơ và kiểm tra trường SLA & Reassignment qua Live HTTP:');
+  const resDocP12 = await fetch(`${API_BASE}/documents`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenUserA}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      templateId: createdTplId,
+      workflowTemplateId: createdWfId,
+      title: 'Hồ sơ kiểm thử Live HTTP Phase 12 Reassignment & SLA',
+      urgency: 'NORMAL',
+      formData: {
+        ten_thiet_bi: 'Thiết bị Phase 12 SLA',
+        ngan_sach: 75000000,
+        ngay_can: '2026-12-01',
+        muc_dich: 'Thử nghiệm Live HTTP Phase 12 Reassignment & SLA',
+      },
+    }),
+  });
+  const bodyDocP12 = await resDocP12.json();
+  const docP12Id = bodyDocP12.data?.id;
+
+  // Nộp hồ sơ
+  await fetch(`${API_BASE}/documents/${docP12Id}/submit`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${tokenUserA}` },
+  });
+
+  // Đọc chi tiết hồ sơ
+  const resDetailP12 = await fetch(`${API_BASE}/documents/${docP12Id}`, {
+    headers: { Authorization: `Bearer ${tokenUserA}` },
+  });
+  const bodyDetailP12 = await resDetailP12.json();
+  const docData = bodyDetailP12.data;
+
+  console.log(`   Document Status: ${docData?.status} | SLA Status: ${docData?.slaStatus} | canReassign: ${docData?.permissions?.canReassign}`);
+  if (!docData?.dueDate || docData?.slaStatus !== 'ON_TRACK' || docData?.permissions?.canReassign !== true) {
+    throw new Error('Test 27 thất bại: Hồ sơ không trả về đúng thông tin SLA hoặc quyền canReassign');
+  }
+  console.log('   -> PASS (Khởi tạo hồ sơ và kiểm tra trường SLA qua Live HTTP thành công)\n');
+
+  // Test 28: Chuyển giao người duyệt hợp lệ qua POST /api/documents/:id/reassign
+  console.log('28. Test chuyển giao người duyệt hợp lệ bởi Admin qua Live HTTP:');
+  const currentStep = docData.workflow.steps[0];
+  const oldUserId = currentStep.assignees[0].userId;
+
+  const resReassignOk = await fetch(`${API_BASE}/documents/${docP12Id}/reassign`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenAdminAlpha}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      stepId: currentStep.id,
+      oldUserId,
+      newUserId: newApproverAlpha.id,
+      reason: 'Người duyệt bận đi công tác 1 tuần, chuyển giao duyệt gấp',
+    }),
+  });
+  const bodyReassignOk = await resReassignOk.json();
+  console.log(`   HTTP Status: ${resReassignOk.status} | Success: ${bodyReassignOk.success}`);
+  if (!resReassignOk.ok || !bodyReassignOk.success) {
+    throw new Error(`Test 28 thất bại: Chuyển giao hợp lệ không thành công (${JSON.stringify(bodyReassignOk)})`);
+  }
+
+  // Đọc lại hồ sơ để xác nhận assignee đã cập nhật và có lịch sử chuyển giao
+  const resDetailAfterReassign = await fetch(`${API_BASE}/documents/${docP12Id}`, {
+    headers: { Authorization: `Bearer ${tokenUserA}` },
+  });
+  const bodyDetailAfter = await resDetailAfterReassign.json();
+  const reassignments = bodyDetailAfter.data?.reassignmentHistories || [];
+  const updatedAssigneeIds = (bodyDetailAfter.data?.workflow?.steps[0]?.assignees || []).map((a: any) => a.userId);
+
+  if (!updatedAssigneeIds.includes(newApproverAlpha.id) || reassignments.length === 0) {
+    throw new Error('Test 28 thất bại: Dữ liệu sau chuyển giao không cập nhật đúng người duyệt mới hoặc thiếu lịch sử');
+  }
+  console.log('   -> PASS (Chuyển giao người duyệt thành công, cập nhật assignee và lịch sử)\n');
+
+  // Test 29: Chặn chuyển giao người duyệt cho tài khoản công ty khác (Beta sang Alpha) -> 400 Bad Request
+  console.log('29. Test chặn chuyển giao cho tài khoản khác công ty (Tenant Isolation) qua Live HTTP:');
+  const resReassignDiffOrg = await fetch(`${API_BASE}/documents/${docP12Id}/reassign`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenAdminAlpha}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      stepId: currentStep.id,
+      oldUserId: newApproverAlpha.id,
+      newUserId: userB.id, // userB thuộc Công ty Beta!
+      reason: 'Chuyển giao chéo công ty',
+    }),
+  });
+  console.log(`   HTTP Status: ${resReassignDiffOrg.status}`);
+  if (resReassignDiffOrg.status !== 400) {
+    throw new Error(`Test 29 thất bại: Không chặn chuyển giao sang tổ chức khác (nhận ${resReassignDiffOrg.status})`);
+  }
+  console.log('   -> PASS (Chặn chuyển giao chéo tổ chức thành công)\n');
+
+  // Test 30: Chặn chuyển giao cho tài khoản bị vô hiệu hóa (Inactive) -> 400 Bad Request
+  console.log('30. Test chặn chuyển giao cho tài khoản inactive qua Live HTTP:');
+  const resReassignInactive = await fetch(`${API_BASE}/documents/${docP12Id}/reassign`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenAdminAlpha}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      stepId: currentStep.id,
+      oldUserId: newApproverAlpha.id,
+      newUserId: inactiveUser.id,
+      reason: 'Chuyển giao cho tài khoản bị khóa',
+    }),
+  });
+  console.log(`   HTTP Status: ${resReassignInactive.status}`);
+  if (resReassignInactive.status !== 400) {
+    throw new Error(`Test 30 thất bại: Không chặn chuyển giao cho tài khoản inactive (nhận ${resReassignInactive.status})`);
+  }
+  console.log('   -> PASS (Chặn chuyển giao cho tài khoản inactive thành công)\n');
+
+  // Test 31: Chặn người dùng không có thẩm quyền chuyển giao -> 403 Forbidden
+  console.log('31. Test chặn người dùng không có thẩm quyền chuyển giao qua Live HTTP:');
+  const resReassignForbidden = await fetch(`${API_BASE}/documents/${docP12Id}/reassign`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenUserA}`, // User thường, không phải admin và không phải người đang duyệt
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      stepId: currentStep.id,
+      oldUserId: newApproverAlpha.id,
+      newUserId: userA.id,
+      reason: 'User cố tình đổi người duyệt',
+    }),
+  });
+  console.log(`   HTTP Status: ${resReassignForbidden.status}`);
+  if (resReassignForbidden.status !== 403) {
+    throw new Error(`Test 31 thất bại: Không trả về 403 khi người dùng không đủ quyền (nhận ${resReassignForbidden.status})`);
+  }
+  console.log('   -> PASS (Bảo vệ phân quyền chuyển giao người duyệt thành công)\n');
+
+  // Test 32: Kiểm tra In-App Notifications qua HTTP API
+  console.log('32. Test truy vấn và đánh dấu đã đọc thông báo qua Live HTTP:');
+  // newApproverAlpha vừa được gán duyệt ở Test 28, phải có thông báo
+  const resNotifs = await fetch(`${API_BASE}/notifications`, {
+    headers: { Authorization: `Bearer ${tokenNewApprover}` },
+  });
+  const bodyNotifs = await resNotifs.json();
+  const notifItems = bodyNotifs.data?.items || [];
+  console.log(`   Số lượng thông báo nhận được: ${notifItems.length}`);
+  if (notifItems.length === 0) {
+    throw new Error('Test 32 thất bại: Người nhận chuyển giao không nhận được thông báo in-app');
+  }
+
+  // Lấy số lượng unread
+  const resUnread = await fetch(`${API_BASE}/notifications/unread-count`, {
+    headers: { Authorization: `Bearer ${tokenNewApprover}` },
+  });
+  const bodyUnread = await resUnread.json();
+  console.log(`   Unread Count: ${bodyUnread.data?.unreadCount}`);
+  if (bodyUnread.data?.unreadCount < 1) {
+    throw new Error('Test 32 thất bại: Unread count không chính xác');
+  }
+
+  // Đánh dấu 1 thông báo là đã đọc
+  const firstNotifId = notifItems[0].id;
+  const resMarkRead = await fetch(`${API_BASE}/notifications/${firstNotifId}/read`, {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${tokenNewApprover}` },
+  });
+  console.log(`   Mark as read status: ${resMarkRead.status}`);
+  if (!resMarkRead.ok) {
+    throw new Error('Test 32 thất bại: Đánh dấu đã đọc thông báo thất bại');
+  }
+
+  // Đánh dấu tất cả là đã đọc
+  const resMarkAll = await fetch(`${API_BASE}/notifications/read-all`, {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${tokenNewApprover}` },
+  });
+  if (!resMarkAll.ok) {
+    throw new Error('Test 32 thất bại: Đánh dấu tất cả đã đọc thất bại');
+  }
+  console.log('   -> PASS (Hệ thống thông báo In-App qua Live HTTP hoạt động chuẩn xác)\n');
+
   await prisma.$disconnect();
   console.log('========================================================================');
-  console.log('🎉 TẤT CẢ 22/22 KỊCH BẢN KIỂM THỬ LIVE HTTP & SECURITY TRÊN POSTGRESQL');
-  console.log('   ĐÃ CHẠY THÀNH CÔNG 100%!');
+  console.log('🎉 TẤT CẢ 32/32 KỊCH BẢN KIỂM THỬ LIVE HTTP & SECURITY TRÊN POSTGRESQL');
+  console.log('   (BAO GỒM REASSIGNMENT, SLA & IN-APP NOTIFICATIONS) ĐÃ PASS 100%!');
   console.log('========================================================================');
 }
 
@@ -623,3 +937,4 @@ runLiveTests().catch((err) => {
   console.error('\n❌ Lỗi khi chạy live test:', err);
   process.exit(1);
 });
+

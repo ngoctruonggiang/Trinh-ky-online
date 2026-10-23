@@ -13,6 +13,9 @@ import {
   History,
   CheckCircle2,
   FileCheck,
+  Clock,
+  ArrowRightLeft,
+  AlertTriangle,
 } from 'lucide-react';
 import {
   DocumentDetail,
@@ -114,6 +117,26 @@ export default function DocumentDetailPage({
     }
   };
 
+  const handleReassign = async (payload: { stepId?: string; oldUserId: string; newUserId: string; reason: string }) => {
+    try {
+      setActionLoading(true);
+      setErrorMessage(null);
+      setIsConflictError(false);
+      await documentService.reassignApprover(documentId, payload);
+      await loadDocument();
+    } catch (err: any) {
+      if (err.code === 'CONCURRENCY_CONFLICT' || err.statusCode === 409) {
+        setIsConflictError(true);
+        setErrorMessage(err.message || 'Xung đột khi chuyển giao người duyệt.');
+      } else {
+        setErrorMessage(err.message || 'Lỗi khi chuyển giao người duyệt');
+      }
+      throw err;
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="py-24 text-center">
@@ -175,6 +198,43 @@ export default function DocumentDetailPage({
           <span>Quay lại danh sách</span>
         </Link>
 
+        {/* SLA Banner */}
+        {document.slaStatus === 'OVERDUE' && (
+          <div className="bg-rose-50 border border-rose-200 text-rose-800 rounded-xl p-4 flex items-center justify-between text-xs shadow-xs mb-4">
+            <div className="flex items-center gap-2.5">
+              <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+              <div>
+                <span className="font-bold">Cảnh báo SLA:</span> Hồ sơ đã quá hạn xử lý quy định từ{' '}
+                <strong className="underline">
+                  {document.dueDate ? new Date(document.dueDate).toLocaleString('vi-VN') : 'không xác định'}
+                </strong>
+                . Quá hạn không làm tự động phê duyệt hồ sơ.
+              </div>
+            </div>
+            <span className="px-2.5 py-1 rounded-md bg-rose-600 text-white text-2xs font-bold uppercase tracking-wider shrink-0">
+              Quá hạn SLA
+            </span>
+          </div>
+        )}
+
+        {document.slaStatus === 'NEAR_DUE' && (
+          <div className="bg-amber-50 border border-amber-200 text-amber-800 rounded-xl p-4 flex items-center justify-between text-xs shadow-xs mb-4">
+            <div className="flex items-center gap-2.5">
+              <Clock className="w-4 h-4 text-amber-600 shrink-0" />
+              <div>
+                <span className="font-bold">Lưu ý hạn xử lý:</span> Hồ sơ sắp đến hạn xử lý vào{' '}
+                <strong className="underline">
+                  {document.dueDate ? new Date(document.dueDate).toLocaleString('vi-VN') : 'không xác định'}
+                </strong>
+                . Vui lòng hoàn tất phê duyệt kịp thời.
+              </div>
+            </div>
+            <span className="px-2.5 py-1 rounded-md bg-amber-600 text-white text-2xs font-bold uppercase tracking-wider shrink-0">
+              Sắp đến hạn
+            </span>
+          </div>
+        )}
+
         <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div>
             <div className="flex flex-wrap items-center gap-2 mb-2">
@@ -186,6 +246,16 @@ export default function DocumentDetailPage({
               <span className="text-2xs font-medium px-2 py-0.5 rounded bg-indigo-50 text-indigo-700 border border-indigo-200">
                 Phiên bản v{document.currentVersion}
               </span>
+              {document.slaStatus === 'OVERDUE' && (
+                <span className="text-2xs font-bold px-2 py-0.5 rounded bg-rose-100 text-rose-800 border border-rose-300">
+                  Quá hạn SLA
+                </span>
+              )}
+              {document.slaStatus === 'NEAR_DUE' && (
+                <span className="text-2xs font-semibold px-2 py-0.5 rounded bg-amber-100 text-amber-800 border border-amber-300">
+                  Sắp đến hạn SLA
+                </span>
+              )}
               {isMockMode ? (
                 <span className="text-2xs font-medium px-2 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">
                   Chế độ Thử nghiệm (Mock Data)
@@ -401,6 +471,44 @@ export default function DocumentDetailPage({
               </div>
             )}
           </div>
+
+          {/* Lịch sử Chuyển giao Người duyệt (StepReassignmentHistory) */}
+          {document.reassignmentHistories && document.reassignmentHistories.length > 0 && (
+            <div className="bg-white rounded-xl border border-slate-200 shadow-xs p-6">
+              <h3 className="text-sm font-semibold text-slate-900 mb-4 flex items-center gap-2">
+                <ArrowRightLeft className="w-4 h-4 text-indigo-600" />
+                Lịch sử Chuyển giao Người duyệt ({document.reassignmentHistories.length})
+              </h3>
+              <div className="space-y-3">
+                {document.reassignmentHistories.map((hist) => (
+                  <div key={hist.id} className="p-3.5 rounded-lg border border-indigo-100 bg-indigo-50/40 text-xs">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="font-semibold text-indigo-950 flex items-center gap-1.5">
+                        <span className="px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-800 text-2xs font-mono font-bold">
+                          {hist.stepName || 'Bước duyệt'}
+                        </span>
+                        <span>
+                          {hist.oldUserName || hist.oldUserId} → {hist.newUserName || hist.newUserId}
+                        </span>
+                      </span>
+                      <span className="text-2xs text-slate-400">
+                        {new Date(hist.createdAt).toLocaleString('vi-VN')}
+                      </span>
+                    </div>
+                    <div className="text-slate-600 text-2xs flex items-center gap-1 mb-1">
+                      <span>Thực hiện bởi:</span>
+                      <strong className="text-slate-800">{hist.reassignedByName || hist.reassignedById}</strong>
+                    </div>
+                    {hist.reason && (
+                      <div className="text-slate-700 mt-1 italic bg-white/70 p-2 rounded border border-indigo-100">
+                        Lý do: "{hist.reason}"
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Right Column: Workflow Action & Timeline (5 cols) */}
@@ -411,6 +519,7 @@ export default function DocumentDetailPage({
             onDecision={handleDecision}
             onResubmit={handleResubmit}
             onCancel={handleCancel}
+            onReassign={handleReassign}
             onReload={loadDocument}
             isLoading={actionLoading}
             errorMessage={errorMessage}

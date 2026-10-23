@@ -49,6 +49,9 @@ export interface DocumentItem {
   currentStepOrder: number;
   totalSteps: number;
   currentStepName: string;
+  dueDate?: string | null;
+  isOverdue?: boolean;
+  slaStatus?: 'ON_TRACK' | 'NEAR_DUE' | 'OVERDUE' | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -80,6 +83,9 @@ export interface WorkflowStepView {
   stepType: StepType;
   completionRule: StepCompletionRule;
   status: StepStatus;
+  dueDate?: string | null;
+  dueDays?: number | null;
+  isOverdue?: boolean;
   assignees: StepAssigneeView[];
 }
 
@@ -105,6 +111,35 @@ export interface SignatureView {
   contentHash: string;
 }
 
+export interface StepReassignmentHistoryView {
+  id: string;
+  stepId: string;
+  stepName?: string;
+  stepOrder?: number;
+  oldUserId: string;
+  oldUserName: string;
+  newUserId: string;
+  newUserName: string;
+  reassignedById: string;
+  reassignedByName: string;
+  reason: string;
+  createdAt: string;
+}
+
+export interface InAppNotification {
+  id: string;
+  userId: string;
+  documentId?: string;
+  documentNumber?: string;
+  documentTitle?: string;
+  type: string;
+  title: string;
+  content: string;
+  isRead: boolean;
+  readAt?: string | null;
+  createdAt: string;
+}
+
 export interface DocumentDetail extends DocumentItem {
   currentVersion: number;
   versions: DocumentVersionView[];
@@ -117,11 +152,13 @@ export interface DocumentDetail extends DocumentItem {
   };
   decisionHistories: DecisionHistoryView[];
   signatures: SignatureView[];
+  reassignmentHistories?: StepReassignmentHistoryView[];
   // Quyền hạn của user hiện tại trên hồ sơ này (tính toán sẵn từ Principal)
   permissions: {
     canApprove: boolean;
     canResubmit: boolean;
     canCancel: boolean;
+    canReassign?: boolean;
     isCreator: boolean;
     isAdmin: boolean;
     currentStepAssigneeRole?: AssigneeRole;
@@ -141,6 +178,13 @@ export interface ResubmitPayload {
 
 export interface CancelPayload {
   cancelReason?: string;
+}
+
+export interface ReassignApproverPayload {
+  stepId?: string;
+  oldUserId: string;
+  newUserId: string;
+  reason: string;
 }
 
 export interface DocumentPagination {
@@ -197,8 +241,13 @@ export interface IDocumentService {
     id: string,
     payload: CancelPayload
   ): Promise<{ success: boolean }>;
+  reassignApprover(
+    id: string,
+    payload: ReassignApproverPayload
+  ): Promise<{ success: boolean; message?: string }>;
   createDocument?(
     payload: import('./template.js').CreateDocumentPayload
   ): Promise<import('./template.js').CreatedDocumentResult>;
 }
+
 

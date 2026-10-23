@@ -77,6 +77,18 @@ export interface CancelDocumentInput {
   userAgent?: string;
 }
 
+export interface ReassignApproverInput {
+  documentId: string;
+  stepId?: string;
+  oldUserId: string;
+  newUserId: string;
+  reason: string;
+  actorId: string;
+  actorRole: string;
+  actorOrganizationId?: string | null;
+  ipAddress?: string;
+}
+
 export class WorkflowOrchestratorService {
   constructor(private readonly prisma: PrismaClient) {}
 
@@ -99,6 +111,8 @@ export class WorkflowOrchestratorService {
         completionRule: step.completionRule,
         status: step.status as StepStatus,
         version: step.version,
+        dueDate: step.dueDate ? (step.dueDate instanceof Date ? step.dueDate.toISOString() : step.dueDate) : undefined,
+        dueDays: step.dueDays ?? undefined,
         assignees: (step.assignees || []).map((a: any): WorkflowAssignee => ({
           id: a.id,
           stepId: a.stepId,
@@ -135,6 +149,11 @@ export class WorkflowOrchestratorService {
     const nowISO = now.toISOString();
 
     return await this.prisma.$transaction(async (tx) => {
+      // 0. Khóa hàng tài liệu để kiểm soát tuần tự các giao dịch trạng thái (Row-level lock)
+      if (typeof (tx as any).$executeRaw === 'function') {
+        await (tx as any).$executeRaw`SELECT id FROM documents WHERE id = ${documentId} FOR UPDATE`;
+      }
+
       // 1. Tải thông tin tài liệu kèm workflow và steps
       const document = await tx.document.findUnique({
         where: { id: documentId },
@@ -200,14 +219,45 @@ export class WorkflowOrchestratorService {
         (s) => s.stepOrder === fsmResult.updatedWorkflow.currentStepOrder
       );
       if (firstStep) {
+        const stepRecord = document.workflow.steps.find((s) => s.id === firstStep.id);
+        const dueDays = stepRecord?.dueDays ?? 3;
+        const dueDate = new Date(now.getTime() + dueDays * 24 * 60 * 60 * 1000);
+
         await tx.approvalStep.update({
           where: { id: firstStep.id },
           data: {
             status: StepStatus.IN_PROGRESS,
             startedAt: now,
+            dueDate,
             version: { increment: 1 },
           },
         });
+
+        await tx.document.update({
+          where: { id: documentId },
+          data: { dueDate },
+        });
+
+        // Gửi thông báo in-app cho người duyệt bước 1
+        const assignees = stepRecord?.assignees || [];
+        for (const asg of assignees) {
+          if (typeof (tx as any).notification?.create === 'function') {
+            await (tx as any).notification.create({
+              data: {
+                userId: asg.userId,
+                documentId: document.id,
+                type: 'ASSIGNED_STEP',
+                title: 'Bạn được phân công duyệt hồ sơ',
+                content: `Hồ sơ "${document.title}" đã được gửi duyệt và cần bạn xử lý bước "${firstStep.stepName}".`,
+                metadata: {
+                  stepId: firstStep.id,
+                  stepName: firstStep.stepName,
+                  dueDate: dueDate.toISOString(),
+                },
+              },
+            });
+          }
+        }
       }
 
       // Ghi AuditLog
@@ -252,6 +302,11 @@ export class WorkflowOrchestratorService {
     const nowISO = now.toISOString();
 
     return await this.prisma.$transaction(async (tx) => {
+      // 0. Khóa hàng tài liệu để đồng bộ hóa quyết định tương tranh (Row-level lock)
+      if (typeof (tx as any).$executeRaw === 'function') {
+        await (tx as any).$executeRaw`SELECT id FROM documents WHERE id = ${documentId} FOR UPDATE`;
+      }
+
       // 1. Tải toàn bộ ngữ cảnh hiện tại
       const document = await tx.document.findUnique({
         where: { id: documentId },
@@ -279,12 +334,18 @@ export class WorkflowOrchestratorService {
       });
 
       if (!document || !document.workflow) {
-        throw new Error(`Không tìm thấy hồ sơ hoặc quy trình duyệt của id: ${documentId}`);
+        throw new NotFoundException(`Không tìm thấy hồ sơ hoặc quy trình duyệt của id: ${documentId}`);
+      }
+
+      if (document.status !== DocumentStatus.IN_REVIEW && document.status !== DocumentStatus.SUBMITTED) {
+        throw new BadRequestException(
+          `Không thể thực hiện phê duyệt trên hồ sơ ở trạng thái ${document.status}.`
+        );
       }
 
       const activeVersion = document.versions[0];
       if (!activeVersion) {
-        throw new Error(`Hồ sơ ${documentId} chưa có phiên bản nội dung (DocumentVersion).`);
+        throw new BadRequestException(`Hồ sơ ${documentId} chưa có phiên bản nội dung (DocumentVersion).`);
       }
 
       const currentStep = document.workflow.steps.find(
@@ -292,16 +353,28 @@ export class WorkflowOrchestratorService {
       );
 
       if (!currentStep) {
-        throw new Error(`Không tìm thấy bước duyệt thứ ${document.workflow.currentStepOrder}`);
+        throw new BadRequestException(`Không tìm thấy bước duyệt thứ ${document.workflow.currentStepOrder}`);
+      }
+
+      if (currentStep.status !== StepStatus.IN_PROGRESS) {
+        throw new BadRequestException(
+          `Bước duyệt "${currentStep.stepName}" không ở trạng thái đang xử lý (IN_PROGRESS). Trạng thái hiện tại: ${currentStep.status}`
+        );
       }
 
       const assignee = currentStep.assignees.find((a) => a.userId === userId);
       if (!assignee) {
-        throw new Error(`Người dùng ${userId} không được phân công trong bước "${currentStep.stepName}"`);
+        throw new ForbiddenException(`Người dùng ${userId} không được phân công trong bước "${currentStep.stepName}"`);
+      }
+
+      if (assignee.user && !assignee.user.isActive) {
+        throw new BadRequestException(
+          `Người duyệt "${assignee.user.fullName}" (${assignee.user.id}) đã bị vô hiệu hóa (inactive), không thể thực hiện phê duyệt.`
+        );
       }
 
       if (assignee.role === AssigneeRole.REVIEWER) {
-        throw new Error('Người giám sát (REVIEWER) chỉ có quyền xem và bình luận, không có thẩm quyền ra quyết định.');
+        throw new ForbiddenException('Người giám sát (REVIEWER) chỉ có quyền xem và bình luận, không có thẩm quyền ra quyết định.');
       }
 
       // 2. Kiểm soát tương tranh cấp cơ sở dữ liệu (Database-level Optimistic Concurrency Control)
@@ -426,6 +499,19 @@ export class WorkflowOrchestratorService {
             status: DocumentStatus.REVISION_REQUESTED,
           },
         });
+
+        if (typeof (tx as any).notification?.create === 'function') {
+          await (tx as any).notification.create({
+            data: {
+              userId: document.createdById,
+              documentId: document.id,
+              type: 'REVISION_REQUESTED',
+              title: 'Hồ sơ có yêu cầu chỉnh sửa',
+              content: `Hồ sơ "${document.title}" có yêu cầu chỉnh sửa từ bước "${currentStep.stepName}". Lý do: ${decisionComment || 'Không có ghi chú'}`,
+              metadata: { stepId: currentStep.id, stepName: currentStep.stepName, requestedById: userId },
+            },
+          });
+        }
       }
 
       // Kịch bản B: Từ chối (REJECTED) -> Hủy các bước sau
@@ -466,6 +552,19 @@ export class WorkflowOrchestratorService {
             status: DocumentStatus.REJECTED,
           },
         });
+
+        if (typeof (tx as any).notification?.create === 'function') {
+          await (tx as any).notification.create({
+            data: {
+              userId: document.createdById,
+              documentId: document.id,
+              type: 'DOCUMENT_REJECTED',
+              title: 'Hồ sơ đã bị từ chối',
+              content: `Hồ sơ "${document.title}" đã bị từ chối tại bước "${currentStep.stepName}". Lý do: ${decisionComment || 'Không có ghi chú'}`,
+              metadata: { stepId: currentStep.id, stepName: currentStep.stepName, rejectedById: userId },
+            },
+          });
+        }
       }
 
       // Kịch bản C: Đồng ý (APPROVED)
@@ -491,15 +590,43 @@ export class WorkflowOrchestratorService {
             const nextStep = fsmResult.updatedWorkflow.steps.find(
               (s) => s.stepOrder === currentStep.stepOrder + 1
             );
+
+            let nextDueDate: Date | null = null;
             if (nextStep) {
+              const nextStepRecord = document.workflow.steps.find((s) => s.id === nextStep.id);
+              const dueDays = nextStepRecord?.dueDays ?? 3;
+              nextDueDate = new Date(now.getTime() + dueDays * 24 * 60 * 60 * 1000);
+
               await tx.approvalStep.update({
                 where: { id: nextStep.id },
                 data: {
                   status: StepStatus.IN_PROGRESS,
                   startedAt: now,
+                  dueDate: nextDueDate,
                   version: { increment: 1 },
                 },
               });
+
+              // Thông báo cho assignees của nextStep
+              const nextAssignees = nextStepRecord?.assignees || [];
+              for (const asg of nextAssignees) {
+                if (typeof (tx as any).notification?.create === 'function') {
+                  await (tx as any).notification.create({
+                    data: {
+                      userId: asg.userId,
+                      documentId: document.id,
+                      type: 'ASSIGNED_STEP',
+                      title: 'Bạn được phân công duyệt hồ sơ',
+                      content: `Hồ sơ "${document.title}" đã chuyển sang bước "${nextStep.stepName}" cần bạn xử lý.`,
+                      metadata: {
+                        stepId: nextStep.id,
+                        stepName: nextStep.stepName,
+                        dueDate: nextDueDate.toISOString(),
+                      },
+                    },
+                  });
+                }
+              }
             }
 
             // Cập nhật Workflow và Document tiến trình
@@ -521,8 +648,26 @@ export class WorkflowOrchestratorService {
               data: {
                 status: fsmResult.newDocumentStatus,
                 currentStepOrder: fsmResult.updatedWorkflow.currentStepOrder,
+                ...(nextDueDate ? { dueDate: nextDueDate } : {}),
               },
             });
+
+            // Nếu toàn bộ quy trình hoàn tất (COMPLETED / APPROVED) -> thông báo cho creator
+            if (
+              fsmResult.newWorkflowStatus === WorkflowStatus.COMPLETED &&
+              typeof (tx as any).notification?.create === 'function'
+            ) {
+              await (tx as any).notification.create({
+                data: {
+                  userId: document.createdById,
+                  documentId: document.id,
+                  type: 'DOCUMENT_APPROVED',
+                  title: 'Hồ sơ đã được phê duyệt',
+                  content: `Hồ sơ "${document.title}" đã hoàn tất tất cả các bước phê duyệt thành công.`,
+                  metadata: { completedAt: now.toISOString() },
+                },
+              });
+            }
           }
         }
       }
@@ -573,6 +718,9 @@ export class WorkflowOrchestratorService {
     const nowISO = now.toISOString();
 
     return await this.prisma.$transaction(async (tx) => {
+      if (typeof (tx as any).$executeRaw === 'function') {
+        await (tx as any).$executeRaw`SELECT id FROM documents WHERE id = ${documentId} FOR UPDATE`;
+      }
       const document = await tx.document.findUnique({
         where: { id: documentId },
         include: {
@@ -626,6 +774,8 @@ export class WorkflowOrchestratorService {
       // 3. Reset các bước duyệt: Bước 1 thành IN_PROGRESS, các bước sau thành WAITING
       const sortedSteps = document.workflow.steps.sort((a, b) => a.stepOrder - b.stepOrder);
       const firstStep = sortedSteps[0];
+      const dueDays = firstStep.dueDays ?? 3;
+      const resubmitDueDate = new Date(now.getTime() + dueDays * 24 * 60 * 60 * 1000);
 
       await tx.approvalStep.update({
         where: { id: firstStep.id },
@@ -633,6 +783,7 @@ export class WorkflowOrchestratorService {
           status: StepStatus.IN_PROGRESS,
           startedAt: now,
           completedAt: null,
+          dueDate: resubmitDueDate,
           version: { increment: 1 },
         },
       });
@@ -655,6 +806,7 @@ export class WorkflowOrchestratorService {
             status: StepStatus.WAITING,
             startedAt: null,
             completedAt: null,
+            dueDate: null,
             version: { increment: 1 },
           },
         });
@@ -686,8 +838,29 @@ export class WorkflowOrchestratorService {
           status: DocumentStatus.IN_REVIEW,
           currentVersion: newVersionNumber,
           currentStepOrder: 1,
+          dueDate: resubmitDueDate,
         },
       });
+
+      // Gửi thông báo in-app cho người duyệt bước 1 khi nộp lại
+      for (const asg of firstStep.assignees || []) {
+        if (typeof (tx as any).notification?.create === 'function') {
+          await (tx as any).notification.create({
+            data: {
+              userId: asg.userId,
+              documentId: document.id,
+              type: 'ASSIGNED_STEP',
+              title: 'Hồ sơ đã được nộp lại',
+              content: `Hồ sơ "${document.title}" đã được chỉnh sửa và nộp lại, cần bạn duyệt bước "${firstStep.stepName}".`,
+              metadata: {
+                stepId: firstStep.id,
+                stepName: firstStep.stepName,
+                dueDate: resubmitDueDate.toISOString(),
+              },
+            },
+          });
+        }
+      }
 
       // 5. Ghi AuditLog
       await tx.auditLog.create({
@@ -725,6 +898,9 @@ export class WorkflowOrchestratorService {
     const nowISO = now.toISOString();
 
     return await this.prisma.$transaction(async (tx) => {
+      if (typeof (tx as any).$executeRaw === 'function') {
+        await (tx as any).$executeRaw`SELECT id FROM documents WHERE id = ${documentId} FOR UPDATE`;
+      }
       const document = await tx.document.findUnique({
         where: { id: documentId },
         include: {
@@ -985,6 +1161,7 @@ export class WorkflowOrchestratorService {
               stepType: (stepConfig.stepType as any) || 'SEQUENTIAL',
               completionRule: (stepConfig.completionRule as any) || 'ALL_MUST_APPROVE',
               status: StepStatus.WAITING,
+              dueDays: stepConfig.dueDays ?? 3,
               version: 0,
             },
           });
@@ -1119,6 +1296,7 @@ export class WorkflowOrchestratorService {
               stepType: (stepConfig.stepType as any) || 'SEQUENTIAL',
               completionRule: (stepConfig.completionRule as any) || 'ALL_MUST_APPROVE',
               status: StepStatus.WAITING,
+              dueDays: (stepConfig as any).dueDays ?? 3,
               version: 0,
             },
           });
@@ -1146,6 +1324,7 @@ export class WorkflowOrchestratorService {
             stepType: 'SEQUENTIAL',
             completionRule: 'ALL_MUST_APPROVE',
             status: StepStatus.WAITING,
+            dueDays: 3,
             version: 0,
           },
         });
@@ -1182,4 +1361,275 @@ export class WorkflowOrchestratorService {
       };
     });
   }
+
+  /**
+   * Chuyển giao người duyệt (Reassign Approver) trên bước đang xử lý
+   */
+  public async reassignApprover(input: ReassignApproverInput) {
+    const {
+      documentId,
+      stepId,
+      oldUserId,
+      newUserId,
+      reason,
+      actorId,
+      actorRole,
+      actorOrganizationId,
+      ipAddress,
+    } = input;
+
+    if (!reason || !reason.trim()) {
+      throw new BadRequestException('Lý do chuyển giao người duyệt không được để trống.');
+    }
+
+    if (oldUserId === newUserId) {
+      throw new BadRequestException('Không thể chuyển giao cho chính người đang được phân công.');
+    }
+
+    const now = new Date();
+
+    return await this.prisma.$transaction(async (tx) => {
+      // 0. Khóa hàng tài liệu chống race condition
+      if (typeof (tx as any).$executeRaw === 'function') {
+        await (tx as any).$executeRaw`SELECT id FROM documents WHERE id = ${documentId} FOR UPDATE`;
+      }
+
+      // 1. Tải hồ sơ kèm workflow, steps, assignees
+      const document = await tx.document.findUnique({
+        where: { id: documentId },
+        include: {
+          workflow: {
+            include: {
+              steps: {
+                orderBy: { stepOrder: 'asc' },
+                include: {
+                  assignees: {
+                    include: {
+                      user: {
+                        select: {
+                          id: true,
+                          fullName: true,
+                          email: true,
+                          isActive: true,
+                          organizationId: true,
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      });
+
+      if (!document || !document.workflow) {
+        throw new NotFoundException(`Không tìm thấy hồ sơ hoặc quy trình duyệt của id: ${documentId}`);
+      }
+
+      // 2. Kiểm tra trạng thái hồ sơ: Chỉ cho phép chuyển giao khi đang IN_REVIEW hoặc SUBMITTED
+      if (
+        document.status !== DocumentStatus.IN_REVIEW &&
+        document.status !== DocumentStatus.SUBMITTED
+      ) {
+        throw new BadRequestException(
+          `Không thể chuyển giao người duyệt khi hồ sơ ở trạng thái ${document.status}. Hồ sơ phải đang trong quá trình xử lý.`
+        );
+      }
+
+      // 3. Phân quyền chuyển giao (Authorization):
+      // - SUPER_ADMIN
+      // - ADMIN của tổ chức hồ sơ
+      // - Chính người duyệt cũ (Self-reassignment)
+      const isSuperAdmin = actorRole === 'SUPER_ADMIN';
+      const isDocAdmin =
+        actorRole === 'ADMIN' &&
+        (!document.organizationId || document.organizationId === actorOrganizationId);
+      const isSelf = actorId === oldUserId;
+
+      if (!isSuperAdmin && !isDocAdmin && !isSelf) {
+        throw new ForbiddenException(
+          'Bạn không có quyền chuyển giao người duyệt cho hồ sơ này (chỉ SUPER_ADMIN, Quản trị viên tổ chức hoặc chính người duyệt mới được chuyển giao).'
+        );
+      }
+
+      // 4. Xác định bước duyệt mục tiêu
+      let targetStep: (typeof document.workflow.steps)[0] | undefined;
+      if (stepId) {
+        targetStep = document.workflow.steps.find((s) => s.id === stepId);
+      } else {
+        targetStep = document.workflow.steps.find(
+          (s) => s.stepOrder === document.workflow!.currentStepOrder
+        );
+      }
+
+      if (!targetStep) {
+        throw new NotFoundException('Không tìm thấy bước duyệt tương ứng để chuyển giao.');
+      }
+
+      // 5. Kiểm tra bước duyệt phải đang IN_PROGRESS
+      if (targetStep.status !== StepStatus.IN_PROGRESS) {
+        throw new BadRequestException(
+          `Bước duyệt "${targetStep.stepName}" không ở trạng thái đang xử lý (IN_PROGRESS). Trạng thái hiện tại: ${targetStep.status}. Không thể chuyển giao bước đã hoàn tất hoặc chưa bắt đầu.`
+        );
+      }
+
+      // 6. Tìm assignee cũ
+      const oldAssignee = targetStep.assignees.find((a) => a.userId === oldUserId);
+      if (!oldAssignee) {
+        throw new BadRequestException(
+          `Người dùng ${oldUserId} không phải là người duyệt trong bước "${targetStep.stepName}".`
+        );
+      }
+
+      // 7. Bảo đảm tính bất biến: Không cho phép chuyển giao nếu người duyệt cũ đã ra quyết định
+      if (oldAssignee.decision !== AssigneeDecision.PENDING) {
+        throw new BadRequestException(
+          `Không thể chuyển giao người duyệt đã ra quyết định (${oldAssignee.decision}). Lịch sử quyết định đã chốt là bất biến.`
+        );
+      }
+
+      // 8. Kiểm tra tính hợp lệ của người duyệt mới
+      const newUser = await tx.user.findUnique({
+        where: { id: newUserId },
+        select: {
+          id: true,
+          fullName: true,
+          email: true,
+          isActive: true,
+          organizationId: true,
+        },
+      });
+
+      if (!newUser) {
+        throw new NotFoundException(`Không tìm thấy người dùng mới với id: ${newUserId}`);
+      }
+
+      if (!newUser.isActive) {
+        throw new BadRequestException(
+          `Người duyệt mới "${newUser.fullName}" (${newUser.id}) đã bị vô hiệu hóa (inactive), không thể nhận chuyển giao.`
+        );
+      }
+
+      // Kiểm tra cách ly tổ chức (Tenant isolation)
+      if (
+        document.organizationId &&
+        newUser.organizationId &&
+        newUser.organizationId !== document.organizationId
+      ) {
+        throw new BadRequestException(
+          `Người duyệt mới "${newUser.fullName}" thuộc tổ chức khác, không thể nhận chuyển giao hồ sơ của tổ chức này.`
+        );
+      }
+
+      // Kiểm tra người duyệt mới chưa nằm trong danh sách assignees của bước này
+      const isAlreadyInStep = targetStep.assignees.some((a) => a.userId === newUserId);
+      if (isAlreadyInStep) {
+        throw new BadRequestException(
+          `Người duyệt mới "${newUser.fullName}" đã có trong danh sách duyệt của bước "${targetStep.stepName}".`
+        );
+      }
+
+      // 9. Cập nhật StepAssignee nguyên tử
+      await tx.stepAssignee.update({
+        where: { id: oldAssignee.id },
+        data: {
+          userId: newUserId,
+          decision: AssigneeDecision.PENDING,
+          decisionComment: null,
+          decidedAt: null,
+        },
+      });
+
+      // 10. Ghi nhận lịch sử chuyển giao StepReassignmentHistory
+      let reassignmentHistory: any = null;
+      if (typeof (tx as any).stepReassignmentHistory?.create === 'function') {
+        reassignmentHistory = await (tx as any).stepReassignmentHistory.create({
+          data: {
+            stepId: targetStep.id,
+            oldUserId,
+            newUserId,
+            reassignedById: actorId,
+            reason: reason.trim(),
+            createdAt: now,
+          },
+        });
+      }
+
+      // 11. Ghi AuditLog
+      await tx.auditLog.create({
+        data: {
+          documentId: document.id,
+          userId: actorId,
+          action: AuditAction.REASSIGN_APPROVER,
+          details: {
+            stepId: targetStep.id,
+            stepName: targetStep.stepName,
+            stepOrder: targetStep.stepOrder,
+            oldUserId,
+            oldUserName: oldAssignee.user?.fullName || oldUserId,
+            newUserId,
+            newUserName: newUser.fullName,
+            reason: reason.trim(),
+            previousState: {
+              stepStatus: targetStep.status,
+              documentStatus: document.status,
+            },
+            newState: {
+              stepStatus: targetStep.status,
+              documentStatus: document.status,
+            },
+          },
+          ipAddress,
+        },
+      });
+
+      // 12. Gửi thông báo trong ứng dụng (In-app Notifications)
+      if (typeof (tx as any).notification?.create === 'function') {
+        // Thông báo cho người duyệt mới
+        await (tx as any).notification.create({
+          data: {
+            userId: newUserId,
+            documentId: document.id,
+            type: 'ASSIGNED_STEP',
+            title: 'Bạn được phân công thay thế duyệt hồ sơ',
+            content: `Bạn đã được phân công thay thế duyệt bước "${targetStep.stepName}" của hồ sơ "${document.title}". Lý do: ${reason.trim()}`,
+            metadata: {
+              stepId: targetStep.id,
+              stepName: targetStep.stepName,
+              oldUserId,
+              reassignedById: actorId,
+            },
+          },
+        });
+
+        // Thông báo cho người duyệt cũ
+        await (tx as any).notification.create({
+          data: {
+            userId: oldUserId,
+            documentId: document.id,
+            type: 'REASSIGNED_STEP',
+            title: 'Thay đổi người duyệt hồ sơ',
+            content: `Thẩm quyền duyệt bước "${targetStep.stepName}" của bạn trên hồ sơ "${document.title}" đã được chuyển giao cho ${newUser.fullName}. Lý do: ${reason.trim()}`,
+            metadata: {
+              stepId: targetStep.id,
+              stepName: targetStep.stepName,
+              newUserId,
+              reassignedById: actorId,
+            },
+          },
+        });
+      }
+
+      return {
+        success: true,
+        message: `Chuyển giao quyền duyệt bước "${targetStep.stepName}" thành công sang ${newUser.fullName}.`,
+        reassignmentId: reassignmentHistory?.id,
+        stepId: targetStep.id,
+        oldUserId,
+        newUserId,
+      };
+    });
+  }
 }
+

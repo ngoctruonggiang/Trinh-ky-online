@@ -79,6 +79,10 @@ model User {
   comments                        DocumentComment[]
   auditLogs                       AuditLog[]
   decisionHistories               StepDecisionHistory[]
+  reassignmentsAsOld              StepReassignmentHistory[] @relation("ReassignmentOldUser")
+  reassignmentsAsNew              StepReassignmentHistory[] @relation("ReassignmentNewUser")
+  reassignmentsAsActor            StepReassignmentHistory[] @relation("ReassignmentActor")
+  notifications                   Notification[]
 
   @@map("users")
 }
@@ -251,6 +255,7 @@ model Document {
   signatureEvents   SignatureEvent[]
   comments          DocumentComment[]
   auditLogs         AuditLog[]
+  notifications     Notification[]
 
   @@index([status])
   @@index([createdById])
@@ -366,6 +371,8 @@ model ApprovalStep {
   completionRule StepCompletionRule @default(ALL_MUST_APPROVE)
   status         StepStatus         @default(WAITING)
   version        Int                @default(0) // Optimistic locking
+  dueDate        DateTime?          // Hạn xử lý theo SLA (startedAt + dueDays)
+  dueDays        Int?               // Số ngày xử lý tối đa theo cấu hình quy trình SLA
   startedAt      DateTime?
   completedAt    DateTime?
   createdAt      DateTime           @default(now())
@@ -376,6 +383,7 @@ model ApprovalStep {
   signatures     SignatureEvent[]
   comments       DocumentComment[]
   decisionHistories StepDecisionHistory[]
+  reassignments     StepReassignmentHistory[]
 
   @@unique([workflowId, stepOrder])
   @@map("approval_steps")
@@ -476,3 +484,56 @@ model AuditLog {
   @@index([action])
   @@map("audit_logs")
 }
+
+// -------------------------------------------------------------
+// 6. LỊCH SỬ CHUYỂN GIAO & THÔNG BÁO (Reassignment & Notification)
+// -------------------------------------------------------------
+
+model StepReassignmentHistory {
+  id             String       @id @default(uuid())
+  stepId         String
+  oldUserId      String
+  newUserId      String
+  reassignedById String
+  reason         String
+  createdAt      DateTime     @default(now())
+
+  step           ApprovalStep @relation(fields: [stepId], references: [id], onDelete: Cascade)
+  oldUser        User         @relation("ReassignmentOldUser", fields: [oldUserId], references: [id])
+  newUser        User         @relation("ReassignmentNewUser", fields: [newUserId], references: [id])
+  reassignedByUser User       @relation("ReassignmentActor", fields: [reassignedById], references: [id])
+
+  @@index([stepId])
+  @@map("step_reassignment_histories")
+}
+
+enum NotificationType {
+  ASSIGNED_STEP
+  REASSIGNED_STEP
+  REVISION_REQUESTED
+  DOCUMENT_APPROVED
+  DOCUMENT_REJECTED
+  SLA_WARNING
+  SLA_OVERDUE
+}
+
+model Notification {
+  id         String           @id @default(uuid())
+  userId     String
+  documentId String?
+  type       NotificationType
+  title      String
+  content    String
+  isRead     Boolean          @default(false)
+  readAt     DateTime?
+  metadata   Json?
+  createdAt  DateTime         @default(now())
+
+  user       User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  document   Document?        @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead])
+  @@index([documentId])
+  @@map("notifications")
+}
+

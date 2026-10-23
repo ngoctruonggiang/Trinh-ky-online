@@ -460,6 +460,41 @@ describe('WorkflowFSM (Lõi máy trạng thái quy trình duyệt)', () => {
     expect(res.newWorkflowStatus).toBe(WorkflowStatus.CANCELLED);
     expect(res.updatedWorkflow.steps[0].status).toBe(StepStatus.CANCELLED);
   });
+
+  it('17. ANY_CAN_APPROVE trên bước SEQUENTIAL: Chỉ cần 1 người duyệt là hoàn tất bước', () => {
+    const wf = createMockWorkflow();
+    wf.steps[0].stepType = StepType.SEQUENTIAL;
+    wf.steps[0].completionRule = StepCompletionRule.ANY_CAN_APPROVE;
+    wf.steps[0].assignees = [
+      {
+        id: 'asg-1a',
+        stepId: 'step-1',
+        userId: 'user-1a',
+        userFullName: 'Phó phòng 1',
+        userEmail: 'pp1@company.com',
+        role: AssigneeRole.APPROVER,
+        decision: AssigneeDecision.PENDING,
+      },
+      {
+        id: 'asg-1b',
+        stepId: 'step-1',
+        userId: 'user-1b',
+        userFullName: 'Phó phòng 2',
+        userEmail: 'pp2@company.com',
+        role: AssigneeRole.APPROVER,
+        decision: AssigneeDecision.PENDING,
+      },
+    ];
+
+    const res = WorkflowFSM.processDecision({
+      workflow: wf,
+      userId: 'user-1a',
+      decision: AssigneeDecision.APPROVED,
+    });
+    expect(res.success).toBe(true);
+    expect(res.updatedWorkflow.steps[0].status).toBe(StepStatus.COMPLETED);
+    expect(res.updatedWorkflow.currentStepOrder).toBe(2);
+  });
 });
 
 

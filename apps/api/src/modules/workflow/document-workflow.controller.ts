@@ -28,6 +28,7 @@ import { CreateDocumentDto } from './dto/create-document.dto.js';
 import { ProcessDecisionDto } from './dto/process-decision.dto.js';
 import { ResubmitDocumentDto } from './dto/resubmit-document.dto.js';
 import { CancelDocumentDto } from './dto/cancel-document.dto.js';
+import { ReassignApproverDto } from './dto/reassign-approver.dto.js';
 
 interface HttpRequest {
   ip?: string;
@@ -287,6 +288,37 @@ export class DocumentWorkflowController {
       cancelReason: dto.cancelReason,
       ipAddress: req.ip,
       userAgent: this.getUserAgent(req),
+    });
+
+    return {
+      success: true,
+      data: result,
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * 5. Chuyển giao người duyệt (Reassign Approver)
+   * POST /api/documents/:id/reassign
+   */
+  @Post(':id/reassign')
+  @HttpCode(HttpStatus.OK)
+  async reassignApprover(
+    @Param('id') id: string,
+    @Body() dto: ReassignApproverDto,
+    @CurrentUser() user: UserPrincipal,
+    @Req() req: HttpRequest
+  ) {
+    const result = await this.orchestrator.reassignApprover({
+      documentId: id,
+      stepId: dto.stepId,
+      oldUserId: dto.oldUserId,
+      newUserId: dto.newUserId,
+      reason: dto.reason,
+      actorId: user.id,
+      actorRole: user.role,
+      actorOrganizationId: user.organizationId,
+      ipAddress: req.ip,
     });
 
     return {

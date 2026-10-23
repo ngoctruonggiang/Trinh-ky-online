@@ -7,10 +7,10 @@ import { MockTemplateService } from './mock-template-service';
 
 /**
  * Cấu hình chế độ dữ liệu:
- * - Khi biến môi trường NEXT_PUBLIC_USE_MOCK_API='false': kết nối API backend thật.
- * - Mặc định (hoặc khi chưa cấu hình): sử dụng MockDocumentService để phát triển và kiểm thử an toàn.
+ * - Mặc định kết nối API backend thật (HttpDocumentService, HttpTemplateService, HttpWorkflowTemplateService).
+ * - Chỉ khi cấu hình rõ ràng biến môi trường NEXT_PUBLIC_USE_MOCK_API='true' mới sử dụng Mock để phát triển offline.
  */
-export const isMockMode = process.env.NEXT_PUBLIC_USE_MOCK_API !== 'false';
+export const isMockMode = process.env.NEXT_PUBLIC_USE_MOCK_API === 'true';
 
 const getAuthHeaders = () => {
   const headers: Record<string, string> = {};
@@ -62,3 +62,4 @@ export {
   HttpWorkflowTemplateService,
 };
 export type { ITemplateService, IWorkflowTemplateService };
+export { notificationService, NotificationService } from './notification-service';

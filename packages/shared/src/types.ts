@@ -31,6 +31,8 @@ export interface WorkflowStep {
   status: StepStatus;
   version?: number; // Hỗ trợ optimistic concurrency
   assignees: WorkflowAssignee[];
+  dueDate?: string; // Hạn hoàn thành bước theo SLA (ISO string)
+  dueDays?: number; // Số ngày xử lý tối đa theo SLA
   startedAt?: string;
   completedAt?: string;
 }

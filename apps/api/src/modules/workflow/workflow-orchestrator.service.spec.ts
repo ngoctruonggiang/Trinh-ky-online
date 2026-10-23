@@ -40,13 +40,23 @@ describe('WorkflowOrchestratorService (Điều phối Transaction, Concurrency &
       },
       stepAssignee: {
         create: vi.fn().mockResolvedValue({ id: 'assignee-new' }),
+        update: vi.fn().mockResolvedValue({ id: 'assignee-updated' }),
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+      user: {
+        findUnique: vi.fn(),
       },
       documentVersion: {
         create: vi.fn().mockResolvedValue({ id: 'v1' }),
       },
       stepDecisionHistory: {
         create: vi.fn(),
+      },
+      stepReassignmentHistory: {
+        create: vi.fn().mockResolvedValue({ id: 'reassign-1' }),
+      },
+      notification: {
+        create: vi.fn().mockResolvedValue({ id: 'notif-1' }),
       },
       signatureEvent: {
         create: vi.fn(),
@@ -633,6 +643,199 @@ describe('WorkflowOrchestratorService (Điều phối Transaction, Concurrency &
           userRole: 'USER',
         })
       ).rejects.toThrow();
+    });
+  });
+
+  describe('reassignApprover (Chuyển giao người duyệt)', () => {
+    const mockDocument = {
+      id: 'doc-reassign-1',
+      title: 'Hồ sơ chuyển giao',
+      status: DocumentStatus.IN_REVIEW,
+      organizationId: 'org-alpha',
+      workflow: {
+        id: 'wf-1',
+        currentStepOrder: 1,
+        steps: [
+          {
+            id: 'step-1',
+            stepOrder: 1,
+            stepName: 'Trưởng phòng duyệt',
+            status: StepStatus.IN_PROGRESS,
+            completionRule: 'ALL_MUST_APPROVE',
+            assignees: [
+              {
+                id: 'asg-old',
+                userId: 'user-old',
+                role: AssigneeRole.APPROVER,
+                decision: AssigneeDecision.PENDING,
+                user: { id: 'user-old', fullName: 'Nguyễn Văn Cũ', isActive: true, organizationId: 'org-alpha' },
+              },
+            ],
+          },
+        ],
+      },
+    };
+
+    const validNewUser = {
+      id: 'user-new',
+      fullName: 'Trần Văn Mới',
+      email: 'new@alpha.com',
+      isActive: true,
+      organizationId: 'org-alpha',
+    };
+
+    it('17. Chuyển giao thành công khi SUPER_ADMIN thực hiện', async () => {
+      mockPrisma.document.findUnique.mockResolvedValue(mockDocument);
+      mockPrisma.user.findUnique.mockResolvedValue(validNewUser);
+
+      const result = await orchestrator.reassignApprover({
+        documentId: 'doc-reassign-1',
+        stepId: 'step-1',
+        oldUserId: 'user-old',
+        newUserId: 'user-new',
+        reason: 'Đi công tác đột xuất',
+        actorId: 'admin-super',
+        actorRole: 'SUPER_ADMIN',
+      });
+
+      expect(result.success).toBe(true);
+      expect(mockPrisma.stepAssignee.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'asg-old' },
+          data: expect.objectContaining({ userId: 'user-new', decision: AssigneeDecision.PENDING }),
+        })
+      );
+      expect(mockPrisma.stepReassignmentHistory.create).toHaveBeenCalled();
+      expect(mockPrisma.auditLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ action: AuditAction.REASSIGN_APPROVER }),
+        })
+      );
+    });
+
+    it('18. Chuyển giao thành công khi chính người duyệt (Self-reassignment) thực hiện', async () => {
+      mockPrisma.document.findUnique.mockResolvedValue(mockDocument);
+      mockPrisma.user.findUnique.mockResolvedValue(validNewUser);
+
+      const result = await orchestrator.reassignApprover({
+        documentId: 'doc-reassign-1',
+        stepId: 'step-1',
+        oldUserId: 'user-old',
+        newUserId: 'user-new',
+        reason: 'Tôi xin nghỉ phép năm',
+        actorId: 'user-old', // Self
+        actorRole: 'USER',
+        actorOrganizationId: 'org-alpha',
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.newUserId).toBe('user-new');
+    });
+
+    it('19. Chặn 403 nếu người dùng khác không có thẩm quyền cố chuyển giao', async () => {
+      mockPrisma.document.findUnique.mockResolvedValue(mockDocument);
+
+      await expect(
+        orchestrator.reassignApprover({
+          documentId: 'doc-reassign-1',
+          stepId: 'step-1',
+          oldUserId: 'user-old',
+          newUserId: 'user-new',
+          reason: 'Ủy nhiệm',
+          actorId: 'user-stranger',
+          actorRole: 'USER',
+          actorOrganizationId: 'org-alpha',
+        })
+      ).rejects.toThrow('Bạn không có quyền chuyển giao người duyệt cho hồ sơ này');
+    });
+
+    it('20. Chặn 400 nếu chuyển giao cho chính người đó (oldUserId === newUserId)', async () => {
+      await expect(
+        orchestrator.reassignApprover({
+          documentId: 'doc-reassign-1',
+          oldUserId: 'user-old',
+          newUserId: 'user-old',
+          reason: 'Lỗi trùng',
+          actorId: 'admin-super',
+          actorRole: 'SUPER_ADMIN',
+        })
+      ).rejects.toThrow('Không thể chuyển giao cho chính người đang được phân công.');
+    });
+
+    it('21. Chặn 400 nếu người duyệt cũ đã phê duyệt (Lịch sử quyết định bất biến)', async () => {
+      const docWithDecided = {
+        ...mockDocument,
+        workflow: {
+          ...mockDocument.workflow,
+          steps: [
+            {
+              ...mockDocument.workflow.steps[0],
+              assignees: [
+                {
+                  id: 'asg-old',
+                  userId: 'user-old',
+                  role: AssigneeRole.APPROVER,
+                  decision: AssigneeDecision.APPROVED, // Đã duyệt!
+                  user: { id: 'user-old', fullName: 'Nguyễn Văn Cũ', isActive: true },
+                },
+              ],
+            },
+          ],
+        },
+      };
+      mockPrisma.document.findUnique.mockResolvedValue(docWithDecided);
+
+      await expect(
+        orchestrator.reassignApprover({
+          documentId: 'doc-reassign-1',
+          stepId: 'step-1',
+          oldUserId: 'user-old',
+          newUserId: 'user-new',
+          reason: 'Thay người',
+          actorId: 'admin-super',
+          actorRole: 'SUPER_ADMIN',
+        })
+      ).rejects.toThrow('Không thể chuyển giao người duyệt đã ra quyết định');
+    });
+
+    it('22. Chặn 400 nếu người duyệt mới đã bị vô hiệu hóa (inactive)', async () => {
+      mockPrisma.document.findUnique.mockResolvedValue(mockDocument);
+      mockPrisma.user.findUnique.mockResolvedValue({
+        ...validNewUser,
+        isActive: false, // inactive!
+      });
+
+      await expect(
+        orchestrator.reassignApprover({
+          documentId: 'doc-reassign-1',
+          stepId: 'step-1',
+          oldUserId: 'user-old',
+          newUserId: 'user-new',
+          reason: 'Thay người',
+          actorId: 'admin-super',
+          actorRole: 'SUPER_ADMIN',
+        })
+      ).rejects.toThrow('đã bị vô hiệu hóa (inactive)');
+    });
+
+    it('23. Chặn 400 nếu người duyệt mới thuộc công ty/tổ chức khác (Tenant isolation)', async () => {
+      mockPrisma.document.findUnique.mockResolvedValue(mockDocument);
+      mockPrisma.user.findUnique.mockResolvedValue({
+        ...validNewUser,
+        organizationId: 'org-beta', // khác org-alpha!
+      });
+
+      await expect(
+        orchestrator.reassignApprover({
+          documentId: 'doc-reassign-1',
+          stepId: 'step-1',
+          oldUserId: 'user-old',
+          newUserId: 'user-new',
+          reason: 'Thay người',
+          actorId: 'admin-super',
+          actorRole: 'SUPER_ADMIN',
+        })
+      ).rejects.toThrow('thuộc tổ chức khác');
     });
   });
 });

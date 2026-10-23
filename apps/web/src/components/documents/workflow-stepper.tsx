@@ -73,10 +73,10 @@ export function WorkflowStepper({ steps, currentStepOrder }: WorkflowStepperProp
                     )}
                   </div>
 
-                  {/* Step Details Box */}
+                    {/* Step Details Box */}
                   <div className="min-w-0 flex-1 pt-0.5">
                     <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
                         <span className="text-sm font-semibold text-slate-900">
                           Bước {step.stepOrder}: {step.stepName}
                         </span>
@@ -85,6 +85,20 @@ export function WorkflowStepper({ steps, currentStepOrder }: WorkflowStepperProp
                             ? 'Duyệt 1 trong nhiều người'
                             : 'Tất cả phải duyệt'}
                         </span>
+                        {step.dueDate && (
+                          <span
+                            className={`inline-flex items-center gap-1 text-2xs px-2 py-0.5 rounded font-medium border ${
+                              step.isOverdue
+                                ? 'bg-rose-100 text-rose-800 border-rose-300'
+                                : 'bg-slate-50 text-slate-600 border-slate-200'
+                            }`}
+                          >
+                            <Clock className="w-3 h-3" />
+                            {step.isOverdue ? 'Quá hạn: ' : 'Hạn duyệt: '}
+                            {new Date(step.dueDate).toLocaleDateString('vi-VN')}
+                            {step.dueDays ? ` (${step.dueDays} ngày)` : ''}
+                          </span>
+                        )}
                       </div>
                       <StatusBadge status={step.status} />
                     </div>

@@ -236,16 +236,11 @@ export class WorkflowFSM {
     ).length;
 
     let isStepComplete = false;
-    if (currentStep.stepType === StepType.PARALLEL) {
-      if (currentStep.completionRule === StepCompletionRule.ANY_CAN_APPROVE) {
-        // Chỉ cần 1 người duyệt là hoàn thành bước
-        isStepComplete = approvedCount >= 1;
-      } else {
-        // ALL_MUST_APPROVE: tất cả approver phải duyệt
-        isStepComplete = approvedCount === approvers.length;
-      }
+    if (currentStep.completionRule === StepCompletionRule.ANY_CAN_APPROVE) {
+      // Chỉ cần 1 người duyệt là hoàn thành bước
+      isStepComplete = approvedCount >= 1;
     } else {
-      // SEQUENTIAL: tất cả approver trong bước phải hoàn thành
+      // ALL_MUST_APPROVE: tất cả approver phải duyệt
       isStepComplete = approvedCount === approvers.length;
     }
 

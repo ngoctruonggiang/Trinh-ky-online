@@ -64,6 +64,9 @@ describe('DocumentReadService (Secure Read Queries & Multi-Company Boundary)', (
       stepDecisionHistory: {
         findMany: vi.fn().mockResolvedValue([]),
       },
+      stepReassignmentHistory: {
+        findMany: vi.fn().mockResolvedValue([]),
+      },
     };
 
     service = new DocumentReadService(mockPrisma);

@@ -122,6 +122,26 @@ export class DocumentReadService {
       const currentStep = doc.workflow?.steps?.find(
         (s: any) => s.stepOrder === doc.currentStepOrder
       );
+
+      const docDueDate = doc.dueDate instanceof Date ? doc.dueDate.toISOString() : doc.dueDate ?? null;
+      const isDocOverdue =
+        (doc.status === DocumentStatus.IN_REVIEW || doc.status === DocumentStatus.SUBMITTED) &&
+        doc.dueDate
+          ? new Date() > new Date(doc.dueDate)
+          : false;
+
+      let slaStatus: 'ON_TRACK' | 'NEAR_DUE' | 'OVERDUE' | null = null;
+      if (doc.dueDate && (doc.status === DocumentStatus.IN_REVIEW || doc.status === DocumentStatus.SUBMITTED)) {
+        const diffHours = (new Date(doc.dueDate).getTime() - Date.now()) / (1000 * 3600);
+        if (diffHours < 0) {
+          slaStatus = 'OVERDUE';
+        } else if (diffHours <= 24) {
+          slaStatus = 'NEAR_DUE';
+        } else {
+          slaStatus = 'ON_TRACK';
+        }
+      }
+
       return {
         id: doc.id,
         documentNumber: doc.documentNumber,
@@ -138,6 +158,9 @@ export class DocumentReadService {
         currentStepOrder: doc.currentStepOrder,
         totalSteps: doc.workflow?.steps?.length ?? 0,
         currentStepName: currentStep?.stepName ?? '',
+        dueDate: docDueDate,
+        isOverdue: isDocOverdue,
+        slaStatus,
         createdAt: doc.createdAt instanceof Date ? doc.createdAt.toISOString() : doc.createdAt,
         updatedAt: doc.updatedAt instanceof Date ? doc.updatedAt.toISOString() : doc.updatedAt,
       };
@@ -211,16 +234,32 @@ export class DocumentReadService {
     }
 
     // Truy vấn lịch sử quyết định liên quan đến các version của document này
-    const decisionHistories = await this.prisma.stepDecisionHistory.findMany({
-      where: {
-        documentVersion: { documentId: id },
-      },
-      include: {
-        step: { select: { stepOrder: true, stepName: true } },
-        user: { select: { id: true, fullName: true } },
-      },
-      orderBy: { decidedAt: 'asc' },
-    });
+    const [decisionHistories, reassignmentHistories] = await Promise.all([
+      this.prisma.stepDecisionHistory.findMany({
+        where: {
+          documentVersion: { documentId: id },
+        },
+        include: {
+          step: { select: { stepOrder: true, stepName: true } },
+          user: { select: { id: true, fullName: true } },
+        },
+        orderBy: { decidedAt: 'asc' },
+      }),
+      typeof (this.prisma as any).stepReassignmentHistory?.findMany === 'function'
+        ? this.prisma.stepReassignmentHistory.findMany({
+            where: {
+              step: { workflow: { documentId: id } },
+            },
+            include: {
+              step: { select: { stepOrder: true, stepName: true } },
+              oldUser: { select: { id: true, fullName: true, email: true } },
+              newUser: { select: { id: true, fullName: true, email: true } },
+              reassignedByUser: { select: { id: true, fullName: true, email: true } },
+            },
+            orderBy: { createdAt: 'desc' },
+          })
+        : Promise.resolve([]),
+    ]);
 
     // 1. Xác định phiên bản active
     const activeVersionRaw =
@@ -295,28 +334,51 @@ export class DocumentReadService {
       ].includes(doc.status as unknown as DocumentStatus) &&
       (isCreator || isAdmin);
 
+    const canReassign =
+      [
+        DocumentStatus.SUBMITTED,
+        DocumentStatus.IN_REVIEW,
+      ].includes(doc.status as unknown as DocumentStatus) &&
+      currentStep?.status === StepStatus.IN_PROGRESS &&
+      (isAdmin ||
+        (currentAssignee?.role === AssigneeRole.APPROVER &&
+          currentAssignee?.decision === AssigneeDecision.PENDING));
+
     // 3. Map steps & assignees
-    const steps = (doc.workflow?.steps || []).map((step: any) => ({
-      id: step.id,
-      stepOrder: step.stepOrder,
-      stepName: step.stepName,
-      stepType: step.stepType,
-      completionRule: step.completionRule,
-      status: step.status,
-      assignees: (step.assignees || []).map((asg: any) => ({
-        id: asg.id,
-        userId: asg.userId,
-        userName: asg.user?.fullName ?? '',
-        userEmail: asg.user?.email ?? '',
-        role: asg.role as unknown as AssigneeRole,
-        decision: asg.decision as unknown as AssigneeDecision,
-        decisionComment: asg.decisionComment ?? undefined,
-        decidedAt:
-          asg.decidedAt instanceof Date
-            ? asg.decidedAt.toISOString()
-            : asg.decidedAt ?? undefined,
-      })),
-    }));
+    const steps = (doc.workflow?.steps || []).map((step: any) => {
+      const isStepOverdue =
+        step.status === StepStatus.IN_PROGRESS &&
+        step.dueDate &&
+        new Date() > new Date(step.dueDate);
+
+      return {
+        id: step.id,
+        stepOrder: step.stepOrder,
+        stepName: step.stepName,
+        stepType: step.stepType,
+        completionRule: step.completionRule,
+        status: step.status,
+        dueDate:
+          step.dueDate instanceof Date
+            ? step.dueDate.toISOString()
+            : step.dueDate ?? null,
+        dueDays: step.dueDays ?? null,
+        isOverdue: Boolean(isStepOverdue),
+        assignees: (step.assignees || []).map((asg: any) => ({
+          id: asg.id,
+          userId: asg.userId,
+          userName: asg.user?.fullName ?? '',
+          userEmail: asg.user?.email ?? '',
+          role: asg.role as unknown as AssigneeRole,
+          decision: asg.decision as unknown as AssigneeDecision,
+          decisionComment: asg.decisionComment ?? undefined,
+          decidedAt:
+            asg.decidedAt instanceof Date
+              ? asg.decidedAt.toISOString()
+              : asg.decidedAt ?? undefined,
+        })),
+      };
+    });
 
     // 4. Map decision histories
     const mappedDecisionHistories = (decisionHistories || []).map((h: any) => ({
@@ -332,7 +394,24 @@ export class DocumentReadService {
         h.decidedAt instanceof Date ? h.decidedAt.toISOString() : h.decidedAt,
     }));
 
-    // 5. Map signature events (chữ ký số thực tế từ DB)
+    // 5. Map reassignment histories
+    const mappedReassignments = (reassignmentHistories || []).map((r: any) => ({
+      id: r.id,
+      stepId: r.stepId,
+      stepOrder: r.step?.stepOrder,
+      stepName: r.step?.stepName,
+      oldUserId: r.oldUserId,
+      oldUserName: r.oldUser?.fullName ?? '',
+      newUserId: r.newUserId,
+      newUserName: r.newUser?.fullName ?? '',
+      reassignedById: r.reassignedById,
+      reassignedByName: r.reassignedByUser?.fullName ?? '',
+      reason: r.reason,
+      createdAt:
+        r.createdAt instanceof Date ? r.createdAt.toISOString() : r.createdAt,
+    }));
+
+    // 6. Map signature events (chữ ký số thực tế từ DB)
     const signatures = (doc.signatureEvents || []).map((sig: any) => ({
       id: sig.id,
       userId: sig.userId,
@@ -343,6 +422,25 @@ export class DocumentReadService {
       isValid: Boolean(sig.isValid),
       contentHash: sig.contentHash,
     }));
+
+    const docDueDate = doc.dueDate instanceof Date ? doc.dueDate.toISOString() : doc.dueDate ?? null;
+    const isDocOverdue =
+      (doc.status === DocumentStatus.IN_REVIEW || doc.status === DocumentStatus.SUBMITTED) &&
+      doc.dueDate
+        ? new Date() > new Date(doc.dueDate)
+        : false;
+
+    let slaStatus: 'ON_TRACK' | 'NEAR_DUE' | 'OVERDUE' | null = null;
+    if (doc.dueDate && (doc.status === DocumentStatus.IN_REVIEW || doc.status === DocumentStatus.SUBMITTED)) {
+      const diffHours = (new Date(doc.dueDate).getTime() - Date.now()) / (1000 * 3600);
+      if (diffHours < 0) {
+        slaStatus = 'OVERDUE';
+      } else if (diffHours <= 24) {
+        slaStatus = 'NEAR_DUE';
+      } else {
+        slaStatus = 'ON_TRACK';
+      }
+    }
 
     return {
       id: doc.id,
@@ -360,6 +458,9 @@ export class DocumentReadService {
       currentStepOrder: doc.currentStepOrder,
       totalSteps: steps.length,
       currentStepName: currentStep?.stepName ?? '',
+      dueDate: docDueDate,
+      isOverdue: isDocOverdue,
+      slaStatus,
       createdAt:
         doc.createdAt instanceof Date ? doc.createdAt.toISOString() : doc.createdAt,
       updatedAt:
@@ -374,11 +475,13 @@ export class DocumentReadService {
         steps,
       },
       decisionHistories: mappedDecisionHistories,
+      reassignmentHistories: mappedReassignments,
       signatures,
       permissions: {
         canApprove: Boolean(canApprove),
         canResubmit: Boolean(canResubmit),
         canCancel: Boolean(canCancel),
+        canReassign: Boolean(canReassign),
         isCreator,
         isAdmin,
         currentStepAssigneeRole: currentAssignee?.role as unknown as AssigneeRole | undefined,

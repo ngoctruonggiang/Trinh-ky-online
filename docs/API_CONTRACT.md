@@ -663,4 +663,167 @@ Khi hồ sơ được tạo (`POST /api/documents`) liên kết với `workflowT
    - `ANY_CAN_APPROVE`: Chỉ cần bất kỳ 1 người duyệt bấm Duyệt, bước sẽ hoàn thành và chuyển sang bước tiếp theo.
 5. **Toàn vẹn khóa ngoại CSDL:** `Document.workflowTemplateVersionId` có ràng buộc `onDelete: Restrict`, ngăn chặn việc xóa bỏ snapshot phiên bản quy trình khi đang có hồ sơ lịch sử tham chiếu.
 
+### 7.6. Đảm bảo Toàn vẹn Vận hành & Xử lý Tương tranh (Runtime & Concurrency Guarantees - Phase 11.1)
+1. **Khóa Hàng Bi quan (Pessimistic Row-Level Locking):**
+   Mọi giao dịch chuyển trạng thái hồ sơ (`submit`, `decision`, `resubmit`, `cancel`) đều thực thi `SELECT id FROM documents WHERE id = :id FOR UPDATE` ngay khi bắt đầu giao dịch PostgreSQL. Cơ chế này tuần tự hóa tuyệt đối các thao tác đồng thời trên cùng một hồ sơ, ngăn ngừa triệt để tình trạng stale read hoặc race condition giữa hai người duyệt bấm cùng lúc.
+2. **Quy tắc Duyệt Tuần tự Bất biến (Strict Sequential Ordering):**
+   Hồ sơ ở bước $N$ chỉ cho phép người duyệt của bước $N$ ra quyết định. Mọi request duyệt gửi cho bước $N+1$ khi bước $N$ chưa hoàn tất sẽ bị từ chối `403 Forbidden` / `400 Bad Request`.
+3. **Chặn Thao tác Từ Tài khoản Vô hiệu hóa (Inactive Account Guard):**
+   Nếu người duyệt trong bước bị vô hiệu hóa (`isActive: false`), request ra quyết định bị từ chối ngay lập tức `400 Bad Request` ("Người duyệt đã bị vô hiệu hóa").
+4. **Xử lý Quyết định Muộn trong `ANY_CAN_APPROVE`:**
+   Khi một người duyệt hoàn tất bước `ANY_CAN_APPROVE`, bước chuyển ngay sang `COMPLETED`. Mọi quyết định gửi muộn từ các người duyệt còn lại đều bị từ chối và rollback, tuyệt đối không làm thay đổi kết quả đã chốt hoặc tạo lịch sử trùng lặp.
+5. **Kế thừa Quy trình Tự động (Form-to-Workflow Inheritance):**
+   Biểu mẫu `FormTemplate` liên kết `workflowTemplateId` cho phép người dùng khởi tạo hồ sơ mà không cần truyền `workflowTemplateId` thủ công; backend tự động phân giải phiên bản đã xuất bản mới nhất (`workflowTemplateVersionId`) và tạo các bước duyệt hoàn chỉnh trong cùng một transaction.
+
+---
+
+## 8. TÍNH NĂNG PHÊ DUYỆT NÂNG CAO, SLA VÀ THÔNG BÁO (PHASE 12)
+
+### 8.1. Chuyển giao Người duyệt (Reassign Approver)
+Cho phép chuyển giao công việc phê duyệt tại bước đang xử lý từ người duyệt cũ sang người duyệt mới mà không mở lại bước đã hoàn tất hoặc sửa quyết định đã có.
+
+- **Endpoint:** `POST /api/documents/:id/reassign`
+- **Quyền hạn:**
+  - `SUPER_ADMIN` (toàn hệ thống), `ADMIN` cùng tổ chức với hồ sơ, hoặc chính người duyệt đang chờ trong bước hiện tại (`self-reassignment`).
+  - Người dùng không có quyền bị từ chối `403 Forbidden`.
+- **Ràng buộc nghiệp vụ:**
+  - Hồ sơ phải ở trạng thái `IN_REVIEW`. Hồ sơ đã kết thúc (`APPROVED`, `REJECTED`, `CANCELLED`) bị chặn `400 Bad Request`.
+  - Bước duyệt phải là bước hiện tại (`IN_PROGRESS`). Bước đã hoàn tất (`COMPLETED`, `SKIPPED`) bị từ chối `400 Bad Request`.
+  - Chỉ thay thế người duyệt cũ có `decision === 'PENDING'`. Nếu người cũ đã quyết định (`APPROVED`, `REJECTED`, `REVISION_REQUESTED`), hệ thống chặn `400 Bad Request` để bảo toàn tính bất biến của lịch sử.
+  - Người duyệt mới phải thuộc cùng tổ chức (`organizationId`), tài khoản phải đang kích hoạt (`isActive: true`), không trùng với người cũ và chưa được phân công trong bước đó.
+  - Tuyệt đối không tự động chuyển trạng thái hồ sơ sang `APPROVED` khi chuyển giao.
+  - Áp dụng khóa bi quan PostgreSQL `SELECT id FROM documents WHERE id = :id FOR UPDATE` để chống xung đột race condition.
+- **Request Body DTO (`ReassignApproverDto`):**
+```json
+{
+  "stepId": "step-uuid-optional",
+  "oldUserId": "user-old-approver-id",
+  "newUserId": "user-new-approver-id",
+  "reason": "Cán bộ công tác nước ngoài đột xuất, chuyển giao trưởng phòng phó duyệt thay"
+}
+```
+- **Response Thành Công (200 OK):**
+```json
+{
+  "success": true,
+  "data": {
+    "success": true,
+    "message": "Chuyển giao người duyệt thành công.",
+    "documentId": "doc-uuid",
+    "stepId": "step-uuid",
+    "oldUserId": "user-old-id",
+    "newUserId": "user-new-id"
+  },
+  "timestamp": "2026-10-23T10:00:00.000Z"
+}
+```
+- **Lưu vết và Nhật ký:**
+  - Tạo bản ghi `StepReassignmentHistory` lưu vết đầy đủ: `stepId`, `oldUserId`, `newUserId`, `reassignedById`, `reason`, `createdAt`.
+  - Ghi bản ghi `AuditLog` với action `REASSIGN_APPROVER`.
+  - Tự động sinh `Notification` In-App cho người duyệt mới (`REASSIGNED_STEP`) và người duyệt cũ.
+
+---
+
+### 8.2. SLA & Hạn Xử lý Hồ sơ
+Hệ thống tính toán thời hạn xử lý cho từng bước duyệt và tổng thể hồ sơ dựa trên cấu hình `dueDays` của từng bước trong workflow template.
+
+- **Thời điểm tính hạn (`dueDate`):** Được tính từ thời điểm bước bắt đầu kích hoạt (`startedAt + dueDays * 24h`).
+- **Phân tách trạng thái SLA khỏi trạng thái nghiệp vụ:**
+  - `slaStatus`: `'ON_TRACK'` (Còn nhiều thời gian), `'NEAR_DUE'` (Còn dưới 24h), `'OVERDUE'` (Đã quá hạn chót).
+  - **Quy tắc cốt lõi:** Quá hạn SLA **tuyệt đối không coi là tự động phê duyệt** (`OVERDUE !== APPROVED`). Trạng thái nghiệp vụ của hồ sơ vẫn là `IN_REVIEW`.
+- **Cập nhật trong Responses:**
+  - `DocumentItem` & `DocumentDetail` bổ sung:
+    - `dueDate`: ISO Date String hoặc `null`.
+    - `isOverdue`: `boolean`.
+    - `slaStatus`: `'ON_TRACK' | 'NEAR_DUE' | 'OVERDUE' | null`.
+    - `reassignmentHistories`: Danh sách lịch sử chuyển giao người duyệt.
+    - `permissions.canReassign`: `boolean` (cho biết user hiện tại có quyền reassign trên hồ sơ này hay không).
+  - `WorkflowStepView` bổ sung:
+    - `dueDate`: ISO Date String hoặc `null`.
+    - `dueDays`: `number | null`.
+    - `isOverdue`: `boolean`.
+
+---
+
+### 8.3. Hệ thống Thông báo Trong Ứng dụng (In-App Notifications)
+
+Hệ thống thông báo nội bộ module hóa phục vụ gửi thông báo thời gian thực khi có sự kiện duyệt hoặc cảnh báo hạn xử lý.
+
+#### ① Lấy danh sách thông báo của người dùng
+- **Endpoint:** `GET /api/notifications`
+- **Query Parameters:**
+  - `isRead` (Tùy chọn): `true` (lọc đã đọc), `false` (lọc chưa đọc).
+  - `page` (Tùy chọn, mặc định `1`): Số trang.
+  - `limit` (Tùy chọn, mặc định `20`, tối đa `100`): Số lượng mỗi trang.
+- **Response Thành Công (200 OK):**
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "id": "notif-uuid-1",
+        "userId": "user-uuid",
+        "documentId": "doc-uuid-1",
+        "documentNumber": "TK-2026-0001",
+        "documentTitle": "Giấy đề nghị tạm ứng công tác phí",
+        "documentStatus": "IN_REVIEW",
+        "type": "REASSIGNED_STEP",
+        "title": "Bạn được chuyển giao duyệt hồ sơ",
+        "content": "Bạn được chuyển giao duyệt hồ sơ \"Giấy đề nghị tạm ứng công tác phí\". Lý do: Cán bộ nghỉ phép",
+        "isRead": false,
+        "readAt": null,
+        "metadata": { "oldUserId": "user-old-id", "reason": "Cán bộ nghỉ phép" },
+        "createdAt": "2026-10-23T09:30:00.000Z"
+      }
+    ],
+    "unreadCount": 1,
+    "pagination": { "page": 1, "limit": 20, "total": 1 }
+  },
+  "timestamp": "2026-10-23T10:00:00.000Z"
+}
+```
+
+#### ② Đếm số lượng thông báo chưa đọc
+- **Endpoint:** `GET /api/notifications/unread-count`
+- **Response Thành Công (200 OK):**
+```json
+{
+  "success": true,
+  "data": {
+    "unreadCount": 3
+  },
+  "timestamp": "2026-10-23T10:00:00.000Z"
+}
+```
+
+#### ③ Đánh dấu một thông báo đã đọc
+- **Endpoint:** `PATCH /api/notifications/:id/read`
+- **Response Thành Công (200 OK):**
+```json
+{
+  "success": true,
+  "data": {
+    "id": "notif-uuid-1",
+    "isRead": true,
+    "readAt": "2026-10-23T10:02:00.000Z"
+  },
+  "timestamp": "2026-10-23T10:02:00.000Z"
+}
+```
+
+#### ④ Đánh dấu tất cả thông báo đã đọc
+- **Endpoint:** `PATCH /api/notifications/read-all`
+- **Response Thành Công (200 OK):**
+```json
+{
+  "success": true,
+  "data": {
+    "updatedCount": 3
+  },
+  "timestamp": "2026-10-23T10:02:00.000Z"
+}
+```
+
+
 

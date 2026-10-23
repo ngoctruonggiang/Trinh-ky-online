@@ -595,6 +595,11 @@ export class WorkflowTemplateService {
 
     try {
       return await this.prisma.$transaction(async (tx) => {
+        // Khóa bi quan chống tranh chấp phát hành đồng thời (Pessimistic concurrency lock)
+        if (typeof (tx as any).$executeRaw === 'function') {
+          await (tx as any).$executeRaw`SELECT id FROM workflow_templates WHERE id = ${id} FOR UPDATE`;
+        }
+
         // Tải lại template với pessimistic/optimistic boundary
         const currentTpl = await tx.workflowTemplate.findUnique({
           where: { id },

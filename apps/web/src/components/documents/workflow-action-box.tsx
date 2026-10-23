@@ -9,6 +9,7 @@ import {
   AlertTriangle,
   FileCheck2,
   RefreshCw,
+  UserCheck,
 } from 'lucide-react';
 import {
   DocumentDetail,
@@ -25,6 +26,7 @@ interface WorkflowActionBoxProps {
   onDecision: (payload: ProcessDecisionPayload) => Promise<void>;
   onResubmit: (payload: ResubmitPayload) => Promise<void>;
   onCancel: (payload: CancelPayload) => Promise<void>;
+  onReassign?: (payload: { stepId?: string; oldUserId: string; newUserId: string; reason: string }) => Promise<void>;
   onReload: () => void;
   isLoading: boolean;
   errorMessage?: string | null;
@@ -36,6 +38,7 @@ export function WorkflowActionBox({
   onDecision,
   onResubmit,
   onCancel,
+  onReassign,
   onReload,
   isLoading,
   errorMessage,
@@ -43,12 +46,23 @@ export function WorkflowActionBox({
 }: WorkflowActionBoxProps) {
   const { permissions } = document;
 
+  const currentStep = document.workflow?.steps?.find(
+    (s) => s.stepOrder === document.currentStepOrder
+  );
+  const pendingAssignees =
+    currentStep?.assignees?.filter(
+      (a) => a.decision === AssigneeDecision.PENDING
+    ) || [];
+
   // Modals state
   const [modalType, setModalType] = useState<
-    'approve' | 'reject' | 'revision' | 'resubmit' | 'cancel' | null
+    'approve' | 'reject' | 'revision' | 'resubmit' | 'cancel' | 'reassign' | null
   >(null);
   const [comment, setComment] = useState('');
   const [changeSummary, setChangeSummary] = useState('');
+  const [reassignOldUserId, setReassignOldUserId] = useState('');
+  const [reassignNewUserId, setReassignNewUserId] = useState('');
+  const [reassignReason, setReassignReason] = useState('');
   const [validationError, setValidationError] = useState('');
 
   const handleOpenModal = (type: typeof modalType) => {
@@ -56,6 +70,11 @@ export function WorkflowActionBox({
     setComment('');
     setChangeSummary('');
     setValidationError('');
+    if (type === 'reassign') {
+      setReassignOldUserId(pendingAssignees[0]?.userId || '');
+      setReassignNewUserId('');
+      setReassignReason('');
+    }
   };
 
   const handleCloseModal = () => {
@@ -118,7 +137,44 @@ export function WorkflowActionBox({
     }
   };
 
-  const hasAnyAction = permissions.canApprove || permissions.canResubmit || permissions.canCancel;
+  const handleConfirmReassign = async () => {
+    if (!reassignOldUserId) {
+      setValidationError('Vui lòng chọn người duyệt cần chuyển giao.');
+      return;
+    }
+    if (!reassignNewUserId.trim()) {
+      setValidationError('Vui lòng nhập ID/Mã người duyệt mới.');
+      return;
+    }
+    if (reassignOldUserId === reassignNewUserId.trim()) {
+      setValidationError('Người duyệt mới không được trùng với người duyệt cũ.');
+      return;
+    }
+    if (!reassignReason.trim()) {
+      setValidationError('Vui lòng nhập lý do chuyển giao.');
+      return;
+    }
+
+    try {
+      if (onReassign) {
+        await onReassign({
+          stepId: currentStep?.id,
+          oldUserId: reassignOldUserId,
+          newUserId: reassignNewUserId.trim(),
+          reason: reassignReason.trim(),
+        });
+        setModalType(null);
+      }
+    } catch {
+      // Error handled by parent
+    }
+  };
+
+  const hasAnyAction =
+    permissions.canApprove ||
+    permissions.canResubmit ||
+    permissions.canCancel ||
+    (permissions.canReassign && !!onReassign && pendingAssignees.length > 0);
 
   return (
     <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-xs">
@@ -205,6 +261,17 @@ export function WorkflowActionBox({
             icon={<Ban className="w-4 h-4" />}
           >
             Hủy hồ sơ này
+          </Button>
+        )}
+
+        {permissions.canReassign && onReassign && pendingAssignees.length > 0 && (
+          <Button
+            variant="outline"
+            className="border-indigo-300 text-indigo-700 hover:bg-indigo-50"
+            onClick={() => handleOpenModal('reassign')}
+            icon={<UserCheck className="w-4 h-4" />}
+          >
+            Chuyển giao người duyệt
           </Button>
         )}
       </div>
@@ -401,6 +468,91 @@ export function WorkflowActionBox({
           />
           {validationError && (
             <p className="mt-1 text-2xs text-rose-600">{validationError}</p>
+          )}
+        </div>
+      </Modal>
+
+      {/* Modal: Chuyển giao người duyệt (Reassign) */}
+      <Modal
+        isOpen={modalType === 'reassign'}
+        onClose={handleCloseModal}
+        title="Chuyển giao người duyệt (Reassign Approver)"
+        description="Chuyển quyền phê duyệt bước hiện tại cho nhân sự khác cùng tổ chức. Quyết định trước đó của các bước hoặc người khác không bị ảnh hưởng."
+        footer={
+          <>
+            <Button variant="ghost" onClick={handleCloseModal} disabled={isLoading}>
+              Hủy
+            </Button>
+            <Button
+              variant="primary"
+              className="bg-indigo-600 hover:bg-indigo-700 text-white"
+              onClick={handleConfirmReassign}
+              isLoading={isLoading}
+              icon={<UserCheck className="w-4 h-4" />}
+            >
+              Xác nhận chuyển giao
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <div>
+            <label className="block text-xs font-medium text-slate-700 mb-1">
+              Người duyệt cần chuyển giao (Đang chờ) <span className="text-rose-500">*</span>
+            </label>
+            <select
+              className="w-full rounded-lg border border-slate-300 p-2.5 text-xs text-slate-800 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+              value={reassignOldUserId}
+              onChange={(e) => {
+                setReassignOldUserId(e.target.value);
+                setValidationError('');
+              }}
+            >
+              {pendingAssignees.map((a) => (
+                <option key={a.id} value={a.userId}>
+                  {a.userName || a.userId} {a.userEmail ? `(${a.userEmail})` : ''} - {a.role || 'APPROVER'}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-slate-700 mb-1">
+              Mã định danh / User ID người nhận mới <span className="text-rose-500">*</span>
+            </label>
+            <input
+              type="text"
+              className="w-full rounded-lg border border-slate-300 p-2.5 text-xs text-slate-800 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+              placeholder="Nhập User ID người duyệt mới (VD: user-admin-01)..."
+              value={reassignNewUserId}
+              onChange={(e) => {
+                setReassignNewUserId(e.target.value);
+                setValidationError('');
+              }}
+            />
+            <p className="mt-1 text-2xs text-slate-500">
+              * Người nhận phải là tài khoản đang hoạt động và thuộc cùng tổ chức với hồ sơ.
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-slate-700 mb-1">
+              Lý do chuyển giao <span className="text-rose-500">*</span>
+            </label>
+            <textarea
+              className="w-full rounded-lg border border-slate-300 p-2.5 text-xs text-slate-800 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+              rows={3}
+              placeholder="Nhập lý do chi tiết (VD: Cán bộ nghỉ phép, chuyển vị trí công tác)..."
+              value={reassignReason}
+              onChange={(e) => {
+                setReassignReason(e.target.value);
+                setValidationError('');
+              }}
+            />
+          </div>
+
+          {validationError && (
+            <p className="text-2xs text-rose-600 font-medium">{validationError}</p>
           )}
         </div>
       </Modal>

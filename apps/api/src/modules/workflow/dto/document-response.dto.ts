@@ -26,6 +26,9 @@ export interface DocumentListItemDto {
   currentStepOrder: number;
   totalSteps: number;
   currentStepName: string;
+  dueDate?: string | null;
+  isOverdue?: boolean;
+  slaStatus?: 'ON_TRACK' | 'NEAR_DUE' | 'OVERDUE' | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -67,6 +70,9 @@ export interface WorkflowStepViewDto {
   stepType: StepType;
   completionRule: StepCompletionRule;
   status: StepStatus;
+  dueDate?: string | null;
+  dueDays?: number | null;
+  isOverdue?: boolean;
   assignees: StepAssigneeViewDto[];
 }
 
@@ -92,10 +98,26 @@ export interface SignatureViewDto {
   contentHash: string;
 }
 
+export interface StepReassignmentHistoryViewDto {
+  id: string;
+  stepId: string;
+  stepName?: string;
+  stepOrder?: number;
+  oldUserId: string;
+  oldUserName: string;
+  newUserId: string;
+  newUserName: string;
+  reassignedById: string;
+  reassignedByName: string;
+  reason: string;
+  createdAt: string;
+}
+
 export interface DocumentPermissionsDto {
   canApprove: boolean;
   canResubmit: boolean;
   canCancel: boolean;
+  canReassign: boolean;
   isCreator: boolean;
   isAdmin: boolean;
   currentStepAssigneeRole?: AssigneeRole;
@@ -113,5 +135,7 @@ export interface DocumentDetailDto extends DocumentListItemDto {
   };
   decisionHistories: DecisionHistoryViewDto[];
   signatures: SignatureViewDto[];
+  reassignmentHistories: StepReassignmentHistoryViewDto[];
   permissions: DocumentPermissionsDto;
 }
+

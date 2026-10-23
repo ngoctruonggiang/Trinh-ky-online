@@ -271,4 +271,20 @@ export class HttpDocumentService implements IDocumentService {
       body: JSON.stringify(payload),
     });
   }
+
+  /**
+   * Chuyển giao người duyệt (POST /api/documents/:id/reassign)
+   */
+  public async reassignApprover(
+    id: string,
+    payload: import('@/types/document').ReassignApproverPayload
+  ): Promise<{ success: boolean; message?: string }> {
+    return this.request<{ success: boolean; message?: string }>(
+      `/documents/${encodeURIComponent(id)}/reassign`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+  }
 }

@@ -655,6 +655,38 @@ export class MockDocumentService implements IDocumentService {
       createdAt: now,
     };
   }
+
+  async reassignApprover(
+    id: string,
+    payload: { stepId?: string; oldUserId: string; newUserId: string; reason: string }
+  ): Promise<{ success: boolean; message?: string }> {
+    const doc = this.documents.find((d) => d.id === id);
+    if (!doc) throw new Error('Document not found');
+    const step = doc.workflow.steps.find((s) => s.stepOrder === doc.currentStepOrder);
+    if (!step) throw new Error('Current step not found');
+    const assignee = step.assignees.find((a) => a.userId === payload.oldUserId);
+    if (assignee) {
+      assignee.userId = payload.newUserId;
+      assignee.userName = `User (${payload.newUserId})`;
+    }
+    if (!doc.reassignmentHistories) {
+      doc.reassignmentHistories = [];
+    }
+    doc.reassignmentHistories.push({
+      id: `reassign-${Date.now()}`,
+      stepId: step.id,
+      stepName: step.stepName,
+      oldUserId: payload.oldUserId,
+      oldUserName: assignee?.userName || payload.oldUserId,
+      newUserId: payload.newUserId,
+      newUserName: `User (${payload.newUserId})`,
+      reassignedById: this.currentUser.id,
+      reassignedByName: this.currentUser.fullName,
+      reason: payload.reason,
+      createdAt: new Date().toISOString(),
+    });
+    return { success: true, message: 'Reassigned successfully' };
+  }
 }
 
 export const mockDocumentService = new MockDocumentService();
