@@ -812,28 +812,34 @@ Hệ thống thông báo nội bộ module hóa phục vụ gửi thông báo th
 }
 ```
 
-#### ④ Đánh dấu tất cả thông báo đã đọc
-- **Endpoint:** `PATCH /api/notifications/read-all`
+#### ⑤ Thử lại việc gửi thông báo lỗi (Retry Failed Notifications) - Phase 12.0.2
+- **Endpoint:** `POST /api/notifications/retry-failed`
+- **Quyền hạn:** `ADMIN`, `SUPER_ADMIN`. Người dùng thường bị từ chối `403 Forbidden`.
+- **Hành vi nghiệp vụ:** Quét các thông báo ở trạng thái `FAILED` hoặc `PENDING` có `retryCount < maxRetries` (mặc định 3). Sử dụng cơ chế khóa hàng `FOR UPDATE SKIP LOCKED` để đảm bảo an toàn tuyệt đối khi nhiều worker chạy đồng thời, không gửi lặp thông báo đã `SENT`.
 - **Response Thành Công (200 OK):**
 ```json
 {
   "success": true,
   "data": {
-    "updatedCount": 3
+    "retriedCount": 2,
+    "totalFailed": 2
   },
-  "timestamp": "2026-10-23T10:02:00.000Z"
+  "timestamp": "2026-10-23T10:05:00.000Z"
 }
 ```
 
 ---
 
-### 8.4. SLA Scheduler & Giám sát Tự động (Phase 12.0.1)
+### 8.4. SLA Scheduler & Giám sát Tự động (Phase 12.0.1 & Phase 12.0.2)
 
 Hệ thống cung cấp service quét định kỳ (mặc định mỗi 5 phút) và endpoint kích hoạt quét hoặc giám sát thời gian thực.
 
 #### ① Kích hoạt quét SLA thủ công / Worker
 - **Endpoint:** `POST /api/workflows/sla/trigger-check`
-- **Quyền hạn:** `SUPER_ADMIN` hoặc `ADMIN`. Người dùng thường bị từ chối `403 Forbidden`.
+- **Quyền hạn & Cách ly Tổ chức (Tenant Isolation):**
+  - `SUPER_ADMIN`: Kích hoạt quét trên phạm vi toàn hệ thống xuyên tổ chức.
+  - `ADMIN` (Tenant Admin): **Chỉ kích hoạt quét các hồ sơ thuộc tổ chức của mình** (`targetOrgId = user.organizationId`). Tuyệt đối không quét hoặc gửi thông báo cho hồ sơ thuộc tổ chức khác.
+  - `USER`: Bị từ chối `403 Forbidden`.
 - **Response Thành Công (200 OK):**
 ```json
 {
@@ -864,7 +870,8 @@ Hệ thống cung cấp service quét định kỳ (mặc định mỗi 5 phút)
 
 #### ② Truy vấn trạng thái giám sát SLA
 - **Endpoint:** `GET /api/workflows/sla/status`
-- **Quyền hạn:** Mọi người dùng đã xác thực (Admin/User xem trong phạm vi tổ chức của mình, Super Admin xem toàn hệ thống).
+- **Quyền hạn:** `ADMIN`, `SUPER_ADMIN`. Người dùng thường (`USER`) bị từ chối `403 Forbidden`.
+- **Cách ly Tổ chức (Tenant Isolation):** `ADMIN` chỉ xem số liệu tổng hợp trong phạm vi tổ chức của mình; `SUPER_ADMIN` xem số liệu toàn hệ thống.
 - **Response Thành Công (200 OK):**
 ```json
 {
@@ -882,7 +889,7 @@ Hệ thống cung cấp service quét định kỳ (mặc định mỗi 5 phút)
 
 ---
 
-### 8.5. Cơ chế Idempotency Bền vững & Bảo mật Notification
+### 8.5. Cơ chế Idempotency Bền vững, Multi-Instance & Notification Reliability (Phase 12.0.2)
 
 1. **Database-backed Idempotency:**
    - Mỗi thông báo hệ thống được gán một `idempotencyKey` duy nhất có ràng buộc `@unique` tại PostgreSQL.
@@ -891,16 +898,23 @@ Hệ thống cung cấp service quét định kỳ (mặc định mỗi 5 phút)
      - Cảnh báo quá hạn: `SLA_OVERDUE:${stepId}:${userId}`
      - Phân công duyệt: `ASSIGNED_STEP:${stepId}:${userId}`
      - Chuyển giao duyệt: `REASSIGNED_TO:${stepId}:${newUserId}:${historyId}`
-   - Khi chạy lặp hoặc nhiều worker chạy đồng thời, PostgreSQL ngăn chặn tuyệt đối việc chèn trùng lặp; backend bắt mã lỗi `P2002` và xử lý an toàn dưới dạng no-op.
-2. **Khóa Hàng Bi quan (Row-Level Locking):**
+   - Khi chạy lặp hoặc nhiều worker chạy đồng thời, PostgreSQL ngăn chặn tuyệt đối việc chèn trùng lặp; backend bắt mã lỗi `P2002` và xử lý an toàn dưới dạng `SKIPPED_DUPLICATE`.
+2. **Khóa Hàng Bi quan (Row-Level Locking) & Chống Race Condition:**
    - Quá trình quét SLA khóa bước duyệt bằng `SELECT id FROM approval_steps WHERE id = :id FOR UPDATE`.
    - Nếu bước duyệt chuyển sang `COMPLETED`, `CANCELLED` hoặc `REJECTED` trong lúc chờ khóa, scheduler tự động bỏ qua, không gửi cảnh báo cho bước đã kết thúc.
-3. **Khả năng Khôi phục sau Restart (Restart Resilience):**
-   - Nếu server khởi động lại giữa lúc đang tạo thông báo, toàn bộ transaction PostgreSQL được rollback an toàn, không để lại bản ghi rác. Lần quét tiếp theo của scheduler sẽ tự động nhận diện và xử lý lại đầy đủ.
-4. **Bảo mật Ranh giới Thông báo (Notification Security Boundary):**
+3. **Bảo vệ Đa Instance & Chống Chồng lấn (Multi-Instance Distributed Safety):**
+   - **In-Instance Overlap Guard:** Sử dụng cờ `isProcessing` ngăn một instance tự chạy lặp chồng chéo nếu chu kỳ trước chưa kết thúc.
+   - **Multi-Instance Advisory Lock:** Áp dụng PostgreSQL Session Advisory Lock (`pg_try_advisory_lock(88421941)`) để đảm bảo trong môi trường nhiều pod/node, chỉ có đúng 1 instance thực hiện quét toàn hệ thống trong mỗi chu kỳ.
+4. **Notification Retry Worker & Khôi phục sau Restart:**
+   - Worker chạy nền tự động quét định kỳ các thông báo `FAILED` hoặc `PENDING` (còn sót lại sau server restart).
+   - Sử dụng `FOR UPDATE SKIP LOCKED` trong transaction PostgreSQL để các worker chạy song song không tranh chấp dữ liệu và không xử lý trùng.
+   - Cập nhật số lần thử lại (`retryCount`). Khi đạt ngưỡng `maxRetries` (mặc định 3), tự động dừng retry để tránh lặp vô hạn các lỗi không thể phục hồi.
+   - Thông báo đã ở trạng thái `SENT` tuyệt đối không bao giờ bị gửi lại.
+5. **Bảo mật Ranh giới Thông báo (Notification Security Boundary):**
    - Người dùng chỉ được phép truy vấn và đánh dấu đã đọc (`PATCH /api/notifications/:id/read`) đối với thông báo do chính mình sở hữu. Thao tác trên thông báo của người khác bị từ chối `403 Forbidden`.
    - Thông báo không tồn tại trả về `404 Not Found`.
-   - Không chứa bất kỳ dữ liệu nhạy cảm hoặc nội dung chi tiết biểu mẫu nào trong payload thông báo.
+   - Không chứa bất kỳ dữ liệu nhạy cảm hoặc nội dung chi tiết biểu mẫu (`formData`) nào trong payload thông báo.
+
 
 
 

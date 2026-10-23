@@ -33,7 +33,7 @@ describe('SlaSchedulerController (Unit Tests)', () => {
     controller = new SlaSchedulerController(mockSchedulerService, mockPrisma);
   });
 
-  it('1. ADMIN kích hoạt triggerSlaCheck thành công', async () => {
+  it('1. ADMIN kích hoạt triggerSlaCheck thành công với phạm vi tổ chức (Tenant Isolation)', async () => {
     const adminUser: UserPrincipal = {
       id: 'admin-1',
       email: 'admin@vinagroup.vn',
@@ -45,10 +45,10 @@ describe('SlaSchedulerController (Unit Tests)', () => {
 
     const res = await controller.triggerSlaCheck(adminUser);
     expect(res.success).toBe(true);
-    expect(mockSchedulerService.processSlaChecks).toHaveBeenCalled();
+    expect(mockSchedulerService.processSlaChecks).toHaveBeenCalledWith(expect.any(Date), 'org-1');
   });
 
-  it('2. SUPER_ADMIN kích hoạt triggerSlaCheck thành công', async () => {
+  it('2. SUPER_ADMIN kích hoạt triggerSlaCheck thành công trên phạm vi toàn hệ thống', async () => {
     const superAdmin: UserPrincipal = {
       id: 'sa-1',
       email: 'sa@vinagroup.vn',
@@ -60,7 +60,7 @@ describe('SlaSchedulerController (Unit Tests)', () => {
 
     const res = await controller.triggerSlaCheck(superAdmin);
     expect(res.success).toBe(true);
-    expect(mockSchedulerService.processSlaChecks).toHaveBeenCalled();
+    expect(mockSchedulerService.processSlaChecks).toHaveBeenCalledWith(expect.any(Date), undefined);
   });
 
   it('3. USER thông thường bị chặn 403 Forbidden khi triggerSlaCheck', async () => {
@@ -97,4 +97,19 @@ describe('SlaSchedulerController (Unit Tests)', () => {
       expect.objectContaining({ where: expect.objectContaining({ organizationId: 'org-alpha' }) })
     );
   });
+
+  it('5. USER thông thường bị chặn 403 Forbidden khi gọi getSlaStatus', async () => {
+    const regularUser: UserPrincipal = {
+      id: 'user-1',
+      email: 'user@vinagroup.vn',
+      fullName: 'Regular User',
+      role: 'USER',
+      organizationId: 'org-alpha',
+      departmentId: null,
+    };
+
+    await expect(controller.getSlaStatus(regularUser)).rejects.toThrow(ForbiddenException);
+    expect(mockPrisma.document.count).not.toHaveBeenCalled();
+  });
 });
+

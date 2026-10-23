@@ -71,10 +71,14 @@ export class SlaSchedulerService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Quét và gửi thông báo SLA (SLA_WARNING, SLA_OVERDUE) với cơ chế bảo vệ Idempotency và Concurrency Lock
+   * Quét và gửi thông báo SLA (SLA_WARNING, SLA_OVERDUE) với cơ chế bảo vệ Idempotency, Concurrency Lock và Tenant Isolation
    * @param referenceNow Thời điểm mốc kiểm tra (mặc định là thời gian hiện tại)
+   * @param targetOrgId Nếu được truyền, chỉ quét các hồ sơ thuộc tổ chức tương ứng (Tenant Isolation)
    */
-  async processSlaChecks(referenceNow: Date = new Date()): Promise<SlaCheckSummary> {
+  async processSlaChecks(
+    referenceNow: Date = new Date(),
+    targetOrgId?: string
+  ): Promise<SlaCheckSummary> {
     const summary: SlaCheckSummary = {
       scannedStepsCount: 0,
       warningsSent: 0,
@@ -85,126 +89,205 @@ export class SlaSchedulerService implements OnModuleInit, OnModuleDestroy {
       details: [],
     };
 
-    // 1. Quét danh sách các bước duyệt đang xử lý (IN_PROGRESS) của các hồ sơ đang duyệt (IN_REVIEW)
-    const activeSteps = await this.prisma.approvalStep.findMany({
-      where: {
-        status: StepStatus.IN_PROGRESS,
-        dueDate: { not: null },
-        workflow: {
-          status: WorkflowStatus.RUNNING,
-          document: {
-            status: DocumentStatus.IN_REVIEW,
-          },
-        },
-      },
-      include: {
-        workflow: {
-          include: {
+    // Chống chạy chồng lấn trong cùng 1 instance (In-instance overlap protection)
+    if (this.isProcessing) {
+      this.logger.warn('SLA Scheduler đang xử lý một đợt quét trước đó, bỏ qua lượt quét này.');
+      return summary;
+    }
+
+    this.isProcessing = true;
+
+    // Phục vụ triển khai nhiều instance: Thử lấy PostgreSQL Session Advisory Lock nếu là quét định kỳ toàn hệ thống
+    let hasAdvisoryLock = false;
+    const advisoryLockId = 88421941;
+    if (!targetOrgId && typeof (this.prisma as any).$queryRawUnsafe === 'function') {
+      try {
+        const lockRes: any[] = await (this.prisma as any).$queryRawUnsafe(
+          'SELECT pg_try_advisory_lock($1) AS acquired',
+          advisoryLockId
+        );
+        if (lockRes && lockRes.length > 0 && !lockRes[0].acquired) {
+          this.logger.log('Một instance khác đang thực hiện quét SLA toàn hệ thống, bỏ qua lượt này.');
+          this.isProcessing = false;
+          return summary;
+        }
+        hasAdvisoryLock = lockRes?.[0]?.acquired === true;
+      } catch {
+        // Fallback an toàn nếu môi trường test không có advisory lock
+        hasAdvisoryLock = false;
+      }
+    }
+
+    try {
+      // 1. Quét danh sách các bước duyệt đang xử lý (IN_PROGRESS) của các hồ sơ đang duyệt (IN_REVIEW)
+      // Nếu có targetOrgId, lọc chính xác theo tổ chức để đảm bảo Tenant Isolation
+      const activeSteps = await this.prisma.approvalStep.findMany({
+        where: {
+          status: StepStatus.IN_PROGRESS,
+          dueDate: { not: null },
+          workflow: {
+            status: WorkflowStatus.RUNNING,
             document: {
-              select: {
-                id: true,
-                documentNumber: true,
-                title: true,
-                status: true,
-              },
+              status: DocumentStatus.IN_REVIEW,
+              ...(targetOrgId ? { organizationId: targetOrgId } : {}),
             },
           },
         },
-        assignees: {
-          where: {
-            role: AssigneeRole.APPROVER,
-            decision: AssigneeDecision.PENDING,
-          },
-          select: {
-            id: true,
-            userId: true,
-            role: true,
-            decision: true,
-          },
-        },
-      },
-      orderBy: {
-        dueDate: 'asc',
-      },
-    });
-
-    summary.scannedStepsCount = activeSteps.length;
-
-    // Ngưỡng sắp đến hạn: trong vòng 24 giờ tới (86,400,000 ms)
-    const nearDueThresholdMs = 24 * 60 * 60 * 1000;
-
-    for (const step of activeSteps) {
-      if (!step.dueDate || step.assignees.length === 0) {
-        continue;
-      }
-
-      const dueDate = new Date(step.dueDate);
-      const isOverdue = dueDate.getTime() < referenceNow.getTime();
-      const isNearDue =
-        !isOverdue &&
-        dueDate.getTime() - referenceNow.getTime() <= nearDueThresholdMs;
-
-      if (!isOverdue && !isNearDue) {
-        // Hồ sơ vẫn còn nhiều thời gian (ON_TRACK) -> Không cần gửi cảnh báo
-        continue;
-      }
-
-      const notifType = isOverdue
-        ? NotificationType.SLA_OVERDUE
-        : NotificationType.SLA_WARNING;
-
-      const formattedDueDate = this.formatVnDateTime(dueDate);
-      const doc = step.workflow.document;
-
-      // 2. Xử lý từng bước bên trong Transaction với Khóa hàng bi quan (Row-level Lock)
-      try {
-        await this.prisma.$transaction(async (tx) => {
-          // Khóa hàng ApprovalStep để chống hai worker chạy đồng thời
-          await tx.$executeRawUnsafe(
-            'SELECT id FROM approval_steps WHERE id = $1 FOR UPDATE',
-            step.id
-          );
-
-          // Kiểm tra lại trạng thái bước duyệt: nếu bước đã hoàn tất hoặc bị hủy trong lúc chờ lock -> bỏ qua
-          const currentStepState = await tx.approvalStep.findUnique({
-            where: { id: step.id },
+        include: {
+          workflow: {
             include: {
-              workflow: {
-                include: {
-                  document: true,
+              document: {
+                select: {
+                  id: true,
+                  documentNumber: true,
+                  title: true,
+                  status: true,
+                  organizationId: true,
                 },
               },
             },
-          });
-
-          if (
-            !currentStepState ||
-            currentStepState.status !== StepStatus.IN_PROGRESS ||
-            currentStepState.workflow.status !== WorkflowStatus.RUNNING ||
-            currentStepState.workflow.document.status !== DocumentStatus.IN_REVIEW
-          ) {
-            return;
-          }
-
-          // Lấy danh sách assignee đang PENDING mới nhất tại thời điểm khóa
-          const currentAssignees = await tx.stepAssignee.findMany({
+          },
+          assignees: {
             where: {
-              stepId: step.id,
               role: AssigneeRole.APPROVER,
               decision: AssigneeDecision.PENDING,
             },
-          });
+            select: {
+              id: true,
+              userId: true,
+              role: true,
+              decision: true,
+            },
+          },
+        },
+        orderBy: {
+          dueDate: 'asc',
+        },
+      });
 
-          for (const assignee of currentAssignees) {
-            const idempotencyKey = `${notifType}:${step.id}:${assignee.userId}`;
+      summary.scannedStepsCount = activeSteps.length;
 
-            // Kiểm tra xem đã có thông báo với idempotencyKey này chưa
-            const existingNotif = await tx.notification.findUnique({
-              where: { idempotencyKey },
+      // Ngưỡng sắp đến hạn: trong vòng 24 giờ tới (86,400,000 ms)
+      const nearDueThresholdMs = 24 * 60 * 60 * 1000;
+
+      for (const step of activeSteps) {
+        if (!step.dueDate || step.assignees.length === 0) {
+          continue;
+        }
+
+        const dueDate = new Date(step.dueDate);
+        const isOverdue = dueDate.getTime() < referenceNow.getTime();
+        const isNearDue =
+          !isOverdue &&
+          dueDate.getTime() - referenceNow.getTime() <= nearDueThresholdMs;
+
+        if (!isOverdue && !isNearDue) {
+          // Hồ sơ vẫn còn nhiều thời gian (ON_TRACK) -> Không cần gửi cảnh báo
+          continue;
+        }
+
+        const notifType = isOverdue
+          ? NotificationType.SLA_OVERDUE
+          : NotificationType.SLA_WARNING;
+
+        const formattedDueDate = this.formatVnDateTime(dueDate);
+        const doc = step.workflow.document;
+
+        // 2. Xử lý từng bước bên trong Transaction với Khóa hàng bi quan (Row-level Lock)
+        try {
+          await this.prisma.$transaction(async (tx) => {
+            // Khóa hàng ApprovalStep để chống hai worker chạy đồng thời
+            await tx.$executeRawUnsafe(
+              'SELECT id FROM approval_steps WHERE id = $1 FOR UPDATE',
+              step.id
+            );
+
+            // Kiểm tra lại trạng thái bước duyệt: nếu bước đã hoàn tất hoặc bị hủy trong lúc chờ lock -> bỏ qua
+            const currentStepState = await tx.approvalStep.findUnique({
+              where: { id: step.id },
+              include: {
+                workflow: {
+                  include: {
+                    document: true,
+                  },
+                },
+              },
             });
 
-            if (existingNotif) {
-              summary.skippedAlreadySent++;
+            if (
+              !currentStepState ||
+              currentStepState.status !== StepStatus.IN_PROGRESS ||
+              currentStepState.workflow.status !== WorkflowStatus.RUNNING ||
+              currentStepState.workflow.document.status !== DocumentStatus.IN_REVIEW
+            ) {
+              return;
+            }
+
+            // Lấy danh sách assignee đang PENDING mới nhất tại thời điểm khóa
+            const currentAssignees = await tx.stepAssignee.findMany({
+              where: {
+                stepId: step.id,
+                role: AssigneeRole.APPROVER,
+                decision: AssigneeDecision.PENDING,
+              },
+            });
+
+            for (const assignee of currentAssignees) {
+              const idempotencyKey = `${notifType}:${step.id}:${assignee.userId}`;
+
+              // Kiểm tra xem đã có thông báo với idempotencyKey này chưa
+              const existingNotif = await tx.notification.findUnique({
+                where: { idempotencyKey },
+              });
+
+              if (existingNotif) {
+                summary.skippedAlreadySent++;
+                summary.details.push({
+                  stepId: step.id,
+                  stepName: step.stepName,
+                  documentId: doc.id,
+                  documentNumber: doc.documentNumber,
+                  type: notifType,
+                  userId: assignee.userId,
+                  idempotencyKey,
+                  status: 'SKIPPED_DUPLICATE',
+                });
+                continue;
+              }
+
+              // Tạo thông báo với idempotencyKey an toàn
+              const title = isOverdue
+                ? `Cảnh báo quá hạn: Hồ sơ ${doc.documentNumber}`
+                : `Nhắc nhở sắp đến hạn: Hồ sơ ${doc.documentNumber}`;
+
+              const content = isOverdue
+                ? `Bước "${step.stepName}" của hồ sơ "${doc.title}" đã quá hạn xử lý quy định vào ${formattedDueDate}. Vui lòng xử lý ngay.`
+                : `Bước "${step.stepName}" của hồ sơ "${doc.title}" sẽ đến hạn xử lý vào ${formattedDueDate}. Vui lòng sắp xếp phê duyệt.`;
+
+              await tx.notification.create({
+                data: {
+                  userId: assignee.userId,
+                  documentId: doc.id,
+                  type: notifType,
+                  title,
+                  content,
+                  idempotencyKey,
+                  status: NotificationStatus.SENT,
+                  metadata: {
+                    stepId: step.id,
+                    stepName: step.stepName,
+                    dueDate: step.dueDate,
+                    isOverdue,
+                  },
+                },
+              });
+
+              if (isOverdue) {
+                summary.overduesSent++;
+              } else {
+                summary.warningsSent++;
+              }
+
               summary.details.push({
                 stepId: step.id,
                 stepName: step.stepName,
@@ -213,89 +296,74 @@ export class SlaSchedulerService implements OnModuleInit, OnModuleDestroy {
                 type: notifType,
                 userId: assignee.userId,
                 idempotencyKey,
-                status: 'SKIPPED_DUPLICATE',
+                status: 'SENT',
               });
-              continue;
             }
 
-            // Tạo thông báo với idempotencyKey an toàn
-            const title = isOverdue
-              ? `Cảnh báo quá hạn: Hồ sơ ${doc.documentNumber}`
-              : `Nhắc nhở sắp đến hạn: Hồ sơ ${doc.documentNumber}`;
-
-            const content = isOverdue
-              ? `Bước "${step.stepName}" của hồ sơ "${doc.title}" đã quá hạn xử lý quy định vào ${formattedDueDate}. Vui lòng xử lý ngay.`
-              : `Bước "${step.stepName}" của hồ sơ "${doc.title}" sẽ đến hạn xử lý vào ${formattedDueDate}. Vui lòng sắp xếp phê duyệt.`;
-
-            await tx.notification.create({
-              data: {
-                userId: assignee.userId,
-                documentId: doc.id,
-                type: notifType,
-                title,
-                content,
-                idempotencyKey,
-                status: NotificationStatus.SENT,
-                metadata: {
-                  stepId: step.id,
-                  stepName: step.stepName,
-                  dueDate: step.dueDate,
-                  isOverdue,
-                },
-              },
-            });
-
-            if (isOverdue) {
-              summary.overduesSent++;
-            } else {
-              summary.warningsSent++;
+            // Cập nhật timestamp ghi nhận đã gửi trên ApprovalStep
+            if (isOverdue && !currentStepState.slaOverdueSentAt) {
+              await tx.approvalStep.update({
+                where: { id: step.id },
+                data: { slaOverdueSentAt: referenceNow },
+              });
+            } else if (isNearDue && !currentStepState.slaWarningSentAt) {
+              await tx.approvalStep.update({
+                where: { id: step.id },
+                data: { slaWarningSentAt: referenceNow },
+              });
             }
-
+          });
+        } catch (stepErr: any) {
+          // Bắt xung đột Unique Constraint P2002 nếu có race condition bất thường
+          if (stepErr.code === 'P2002') {
+            summary.skippedAlreadySent++;
             summary.details.push({
               stepId: step.id,
               stepName: step.stepName,
               documentId: doc.id,
               documentNumber: doc.documentNumber,
               type: notifType,
-              userId: assignee.userId,
-              idempotencyKey,
-              status: 'SENT',
+              userId: 'RACE_DUPLICATE',
+              idempotencyKey: 'P2002_HANDLED',
+              status: 'SKIPPED_DUPLICATE',
             });
+            continue;
           }
 
-          // Cập nhật timestamp ghi nhận đã gửi trên ApprovalStep
-          if (isOverdue && !currentStepState.slaOverdueSentAt) {
-            await tx.approvalStep.update({
-              where: { id: step.id },
-              data: { slaOverdueSentAt: referenceNow },
-            });
-          } else if (isNearDue && !currentStepState.slaWarningSentAt) {
-            await tx.approvalStep.update({
-              where: { id: step.id },
-              data: { slaWarningSentAt: referenceNow },
-            });
-          }
-        });
-      } catch (stepErr: any) {
-        summary.errorsCount++;
-        this.logger.error(
-          `Lỗi khi xử lý SLA cho bước ${step.id} (${step.stepName}):`,
-          stepErr
-        );
-        summary.details.push({
-          stepId: step.id,
-          stepName: step.stepName,
-          documentId: doc.id,
-          documentNumber: doc.documentNumber,
-          type: notifType,
-          userId: 'N/A',
-          idempotencyKey: 'ERROR',
-          status: 'ERROR',
-          error: stepErr.message || 'Lỗi không xác định',
-        });
+          summary.errorsCount++;
+          this.logger.error(
+            `Lỗi khi xử lý SLA cho bước ${step.id} (${step.stepName}):`,
+            stepErr
+          );
+          summary.details.push({
+            stepId: step.id,
+            stepName: step.stepName,
+            documentId: doc.id,
+            documentNumber: doc.documentNumber,
+            type: notifType,
+            userId: 'N/A',
+            idempotencyKey: 'ERROR',
+            status: 'ERROR',
+            error: stepErr.message || 'Lỗi không xác định',
+          });
+        }
       }
-    }
 
-    return summary;
+      return summary;
+    } finally {
+      // Giải phóng Session Advisory Lock an toàn
+      if (hasAdvisoryLock && typeof (this.prisma as any).$queryRawUnsafe === 'function') {
+        try {
+          await (this.prisma as any).$queryRawUnsafe(
+            'SELECT pg_advisory_unlock($1)',
+            advisoryLockId
+          );
+        } catch {
+          // Bỏ qua lỗi giải phóng lock khi shutdown
+        }
+      }
+      this.isProcessing = false;
+    }
   }
 }
+

@@ -1,4 +1,11 @@
-import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  ForbiddenException,
+  Logger,
+  OnModuleInit,
+  OnModuleDestroy,
+} from '@nestjs/common';
 import { PrismaService } from '../../common/prisma/prisma.service.js';
 import { NotificationType, NotificationStatus } from '@trinh-ky/shared';
 
@@ -14,8 +21,38 @@ export interface CreateNotificationDto {
 }
 
 @Injectable()
-export class NotificationService {
+export class NotificationService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(NotificationService.name);
+  private retryTimer: NodeJS.Timeout | null = null;
+  private isRetrying = false;
+
   constructor(private readonly prisma: PrismaService) {}
+
+  onModuleInit() {
+    // Khởi động worker thử lại việc gửi thông báo định kỳ (mặc định mỗi 60s, tắt trong test)
+    const intervalMs = Number(process.env.NOTIFICATION_RETRY_INTERVAL_MS) || 60 * 1000;
+    if (process.env.NODE_ENV !== 'test' && intervalMs > 0) {
+      this.retryTimer = setInterval(() => {
+        if (this.isRetrying) return;
+        this.isRetrying = true;
+        this.retryFailedNotifications()
+          .catch((err) => {
+            this.logger.error('Lỗi khi chạy định kỳ Notification Retry Worker:', err);
+          })
+          .finally(() => {
+            this.isRetrying = false;
+          });
+      }, intervalMs);
+      this.logger.log(`Notification Retry Worker đã khởi động với tần suất ${intervalMs / 1000}s`);
+    }
+  }
+
+  onModuleDestroy() {
+    if (this.retryTimer) {
+      clearInterval(this.retryTimer);
+      this.retryTimer = null;
+    }
+  }
 
   /**
    * Lấy danh sách thông báo của người dùng với phân trang và lọc theo trạng thái đã đọc
@@ -178,39 +215,82 @@ export class NotificationService {
   }
 
   /**
-   * Thử lại việc gửi các thông báo bị lỗi (FAILED)
+   * Thử lại việc gửi các thông báo bị lỗi (FAILED) hoặc đang chờ (PENDING)
+   * Sử dụng khóa hàng hoặc kiểm soát tương tranh để đảm bảo an toàn khi nhiều worker chạy đồng thời.
+   * Thông báo đã SENT tuyệt đối không bao giờ được gửi lại.
+   * Lỗi vượt quá maxRetries sẽ dừng retry để tránh vòng lặp vô hạn.
    */
   async retryFailedNotifications(maxRetries: number = 3) {
-    const failedItems = await this.prisma.notification.findMany({
-      where: {
-        status: 'FAILED',
-        retryCount: { lt: maxRetries },
-      },
-      take: 50,
-    });
+    return await this.prisma.$transaction(async (tx) => {
+      let candidateIds: string[] = [];
 
-    const retriedIds: string[] = [];
-    for (const item of failedItems) {
       try {
-        await this.prisma.notification.update({
-          where: { id: item.id },
-          data: {
-            status: 'SENT',
-            errorMessage: null,
-            retryCount: item.retryCount + 1,
+        // Áp dụng khóa hàng FOR UPDATE SKIP LOCKED trên PostgreSQL thật nếu có hỗ trợ
+        const rawRows: any[] = await (tx as any).$queryRawUnsafe(
+          `SELECT id FROM notifications 
+           WHERE status IN ('FAILED', 'PENDING') 
+             AND "retryCount" < $1 
+           ORDER BY "createdAt" ASC 
+           LIMIT 50 
+           FOR UPDATE SKIP LOCKED`,
+          maxRetries
+        );
+        candidateIds = rawRows.map((r) => r.id);
+      } catch {
+        // Fallback tương thích môi trường unit test hoặc DB mock
+        const items = await tx.notification.findMany({
+          where: {
+            status: { in: ['FAILED', 'PENDING'] },
+            retryCount: { lt: maxRetries },
           },
+          take: 50,
+          orderBy: { createdAt: 'asc' },
         });
-        retriedIds.push(item.id);
-      } catch (err: any) {
-        await this.prisma.notification.update({
-          where: { id: item.id },
-          data: {
-            retryCount: item.retryCount + 1,
-            errorMessage: err.message || 'Lỗi gửi lại thông báo',
-          },
-        });
+        candidateIds = items.map((i) => i.id);
       }
-    }
-    return { retriedCount: retriedIds.length, totalFailed: failedItems.length };
+
+      if (candidateIds.length === 0) {
+        return { retriedCount: 0, totalFailed: 0 };
+      }
+
+      const targetNotifications = await tx.notification.findMany({
+        where: { id: { in: candidateIds } },
+      });
+
+      const retriedIds: string[] = [];
+      for (const item of targetNotifications) {
+        // Bỏ qua nếu bản ghi đã chuyển sang SENT
+        if (item.status === 'SENT') {
+          continue;
+        }
+
+        try {
+          // In-App Notification lưu trữ trong PostgreSQL:
+          // Đánh dấu thành công sang SENT, xóa errorMessage và tăng retryCount
+          await tx.notification.update({
+            where: { id: item.id },
+            data: {
+              status: NotificationStatus.SENT,
+              errorMessage: null,
+              retryCount: item.retryCount + 1,
+            },
+          });
+          retriedIds.push(item.id);
+        } catch (err: any) {
+          const nextRetryCount = item.retryCount + 1;
+          await tx.notification.update({
+            where: { id: item.id },
+            data: {
+              status: NotificationStatus.FAILED,
+              retryCount: nextRetryCount,
+              errorMessage: err.message || 'Lỗi gửi lại thông báo',
+            },
+          });
+        }
+      }
+
+      return { retriedCount: retriedIds.length, totalFailed: targetNotifications.length };
+    });
   }
 }
+

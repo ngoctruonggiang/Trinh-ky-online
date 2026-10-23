@@ -8,6 +8,7 @@ describe('NotificationService (In-App Notification Engine)', () => {
 
   beforeEach(() => {
     mockPrisma = {
+      $transaction: vi.fn().mockImplementation((cb) => cb(mockPrisma)),
       notification: {
         count: vi.fn(),
         findMany: vi.fn(),
@@ -207,5 +208,54 @@ describe('NotificationService (In-App Notification Engine)', () => {
         })
       );
     });
+
+    it('3.5. retryFailedNotifications xử lý thông báo PENDING còn tồn đọng sau restart', async () => {
+      mockPrisma.notification.findMany.mockResolvedValue([
+        { id: 'notif-pending-1', retryCount: 0, status: 'PENDING' },
+      ]);
+      mockPrisma.notification.update.mockResolvedValue({ id: 'notif-pending-1', status: 'SENT' });
+
+      const result = await service.retryFailedNotifications();
+      expect(result.retriedCount).toBe(1);
+      expect(mockPrisma.notification.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'notif-pending-1' },
+          data: expect.objectContaining({ status: 'SENT', retryCount: 1, errorMessage: null }),
+        })
+      );
+    });
+
+    it('3.6. Không xử lý lại các thông báo đã ở trạng thái SENT', async () => {
+      mockPrisma.notification.findMany.mockResolvedValue([
+        { id: 'notif-sent-1', retryCount: 1, status: 'SENT' },
+      ]);
+
+      const result = await service.retryFailedNotifications();
+      expect(result.retriedCount).toBe(0);
+      expect(mockPrisma.notification.update).not.toHaveBeenCalled();
+    });
+
+    it('3.7. Khi thử lại thất bại, cập nhật trạng thái FAILED, ghi errorMessage và tăng retryCount', async () => {
+      mockPrisma.notification.findMany.mockResolvedValue([
+        { id: 'notif-failed-err', retryCount: 1, status: 'FAILED' },
+      ]);
+      mockPrisma.notification.update
+        .mockRejectedValueOnce(new Error('Lỗi kết nối cơ sở dữ liệu tạm thời'))
+        .mockResolvedValueOnce({ id: 'notif-failed-err', status: 'FAILED', retryCount: 2 });
+
+      const result = await service.retryFailedNotifications();
+      expect(result.retriedCount).toBe(0);
+      expect(mockPrisma.notification.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'notif-failed-err' },
+          data: expect.objectContaining({
+            status: 'FAILED',
+            retryCount: 2,
+            errorMessage: 'Lỗi kết nối cơ sở dữ liệu tạm thời',
+          }),
+        })
+      );
+    });
   });
 });
+

@@ -231,7 +231,7 @@ describe('Phase 12.0.1: SLA Scheduler, Notification Reliability & Idempotency (R
     });
     doc2DocId = doc2.doc.id;
 
-    const summary = await slaSchedulerService.processSlaChecks(now);
+    const summary = await slaSchedulerService.processSlaChecks(now, orgAlphaId);
 
     expect(summary.warningsSent).toBeGreaterThanOrEqual(1);
     expect(summary.overduesSent).toBeGreaterThanOrEqual(1);
@@ -270,16 +270,17 @@ describe('Phase 12.0.1: SLA Scheduler, Notification Reliability & Idempotency (R
     });
     expect(initialCount).toBe(2);
 
-    // Chạy lại scheduler lần 2
-    const summary2 = await slaSchedulerService.processSlaChecks(now);
+    // Chạy lại scheduler lần 2 cho orgAlpha
+    const summary2 = await slaSchedulerService.processSlaChecks(now, orgAlphaId);
     expect(summary2.warningsSent).toBe(0);
     expect(summary2.overduesSent).toBe(0);
     expect(summary2.skippedAlreadySent).toBeGreaterThanOrEqual(2);
 
-    // Chạy lại scheduler lần 3
-    const summary3 = await slaSchedulerService.processSlaChecks(now);
+    // Chạy lại scheduler lần 3 cho orgAlpha
+    const summary3 = await slaSchedulerService.processSlaChecks(now, orgAlphaId);
     expect(summary3.warningsSent).toBe(0);
     expect(summary3.overduesSent).toBe(0);
+
 
     // Tổng số thông báo của 2 hồ sơ không đổi
     const finalCount = await prisma.notification.count({
@@ -300,8 +301,8 @@ describe('Phase 12.0.1: SLA Scheduler, Notification Reliability & Idempotency (R
 
     // Chạy đồng thời 2 worker
     const [res1, res2] = await Promise.all([
-      slaSchedulerService.processSlaChecks(now),
-      slaSchedulerService.processSlaChecks(now),
+      slaSchedulerService.processSlaChecks(now, orgAlphaId),
+      slaSchedulerService.processSlaChecks(now, orgAlphaId),
     ]);
 
     // Tổng số overdueSent giữa 2 worker cho hồ sơ này đúng bằng 1
@@ -334,7 +335,7 @@ describe('Phase 12.0.1: SLA Scheduler, Notification Reliability & Idempotency (R
       data: { status: StepStatus.COMPLETED, completedAt: now },
     });
 
-    const summary = await slaSchedulerService.processSlaChecks(now);
+    const summary = await slaSchedulerService.processSlaChecks(now, orgAlphaId);
 
     // Không gửi thông báo cho bước đã COMPLETED
     const notif = await prisma.notification.findUnique({
@@ -380,7 +381,7 @@ describe('Phase 12.0.1: SLA Scheduler, Notification Reliability & Idempotency (R
     expect(notifBefore).toBeNull();
 
     // Lần chạy tiếp theo của scheduler khôi phục bình thường
-    const summary = await slaSchedulerService.processSlaChecks(now);
+    const summary = await slaSchedulerService.processSlaChecks(now, orgAlphaId);
     const matching = summary.details.find(
       (d) => d.stepId === docRollback.step.id && d.status === 'SENT'
     );
@@ -402,7 +403,8 @@ describe('Phase 12.0.1: SLA Scheduler, Notification Reliability & Idempotency (R
       assigneeUserId: userAlpha1Id,
     });
 
-    await slaSchedulerService.processSlaChecks(now);
+    await slaSchedulerService.processSlaChecks(now, orgAlphaId);
+
 
     const docInDb = await prisma.document.findUnique({ where: { id: docCheck.doc.id } });
     expect(docInDb?.status).toBe(DocumentStatus.IN_REVIEW); // Vẫn IN_REVIEW, không phải APPROVED
@@ -457,4 +459,220 @@ describe('Phase 12.0.1: SLA Scheduler, Notification Reliability & Idempotency (R
     const unreadCountA2 = await notificationService.getUnreadCount(userAlpha2Id);
     expect(unreadCountA2).toBe(0);
   });
+
+  it('9. Notification Retry trên PostgreSQL thật: Retry thành công thông báo FAILED và PENDING sau restart', async () => {
+    // Tạo 1 thông báo FAILED và 1 thông báo PENDING (giả lập server restart trước khi gửi)
+    const failedNotif = await prisma.notification.create({
+      data: {
+        userId: userAlpha1Id,
+        type: NotificationType.ASSIGNED_STEP,
+        title: 'Thông báo lỗi cần retry',
+        content: 'Nội dung retry',
+        status: 'FAILED',
+        retryCount: 0,
+        errorMessage: 'Lỗi timeout kết nối mạng',
+        idempotencyKey: `RETRY_FAILED_TEST_${testSuffix}`,
+      },
+    });
+
+    const pendingNotif = await prisma.notification.create({
+      data: {
+        userId: userAlpha1Id,
+        type: NotificationType.ASSIGNED_STEP,
+        title: 'Thông báo PENDING sau restart',
+        content: 'Nội dung pending',
+        status: 'PENDING',
+        retryCount: 0,
+        idempotencyKey: `RETRY_PENDING_TEST_${testSuffix}`,
+      },
+    });
+
+    // Chạy worker retry
+    const retryRes = await notificationService.retryFailedNotifications(3);
+    expect(retryRes.retriedCount).toBeGreaterThanOrEqual(2);
+
+    // Kiểm tra trạng thái trong PostgreSQL thật
+    const updatedFailed = await prisma.notification.findUnique({ where: { id: failedNotif.id } });
+    expect(updatedFailed?.status).toBe('SENT');
+    expect(updatedFailed?.retryCount).toBe(1);
+    expect(updatedFailed?.errorMessage).toBeNull();
+
+    const updatedPending = await prisma.notification.findUnique({ where: { id: pendingNotif.id } });
+    expect(updatedPending?.status).toBe('SENT');
+    expect(updatedPending?.retryCount).toBe(1);
+    expect(updatedPending?.errorMessage).toBeNull();
+  });
+
+  it('10. Dừng retry khi đã đạt giới hạn cấu hình maxRetries (chống lặp vô hạn lỗi vĩnh viễn)', async () => {
+    const exhaustedNotif = await prisma.notification.create({
+      data: {
+        userId: userAlpha2Id,
+        type: NotificationType.ASSIGNED_STEP,
+        title: 'Thông báo lỗi vĩnh viễn đã hết lượt retry',
+        content: 'Nội dung lỗi',
+        status: 'FAILED',
+        retryCount: 3, // Đã chạm mốc maxRetries
+        errorMessage: 'Tài khoản người nhận không còn hợp lệ',
+        idempotencyKey: `RETRY_EXHAUSTED_TEST_${testSuffix}`,
+      },
+    });
+
+    // Chạy worker với maxRetries = 3
+    await notificationService.retryFailedNotifications(3);
+
+    // Kiểm tra bản ghi vẫn ở trạng thái FAILED và retryCount không tăng
+    const checkExhausted = await prisma.notification.findUnique({ where: { id: exhaustedNotif.id } });
+    expect(checkExhausted?.status).toBe('FAILED');
+    expect(checkExhausted?.retryCount).toBe(3);
+  });
+
+  it('11. Concurrency: Hai worker chạy đồng thời retry không gây deadlock và không cập nhật trùng', async () => {
+    const n1 = await prisma.notification.create({
+      data: {
+        userId: userAlpha1Id,
+        type: NotificationType.ASSIGNED_STEP,
+        title: 'Concurrent notif 1',
+        content: 'Concurrent test 1',
+        status: 'FAILED',
+        retryCount: 0,
+        idempotencyKey: `CONC_RETRY_1_${testSuffix}`,
+      },
+    });
+
+    const n2 = await prisma.notification.create({
+      data: {
+        userId: userAlpha2Id,
+        type: NotificationType.ASSIGNED_STEP,
+        title: 'Concurrent notif 2',
+        content: 'Concurrent test 2',
+        status: 'FAILED',
+        retryCount: 0,
+        idempotencyKey: `CONC_RETRY_2_${testSuffix}`,
+      },
+    });
+
+    // 2 worker chạy retry song song
+    await Promise.all([
+      notificationService.retryFailedNotifications(3),
+      notificationService.retryFailedNotifications(3),
+    ]);
+
+    // Cả hai bản ghi đều chuyển sang SENT thành công và retryCount chính xác bằng 1
+    const res1 = await prisma.notification.findUnique({ where: { id: n1.id } });
+    const res2 = await prisma.notification.findUnique({ where: { id: n2.id } });
+
+    expect(res1?.status).toBe('SENT');
+    expect(res1?.retryCount).toBe(1);
+
+    expect(res2?.status).toBe('SENT');
+    expect(res2?.retryCount).toBe(1);
+  });
+
+  it('12. Tuyệt đối không gửi lại hoặc sửa đổi thông báo đã ở trạng thái SENT', async () => {
+    const sentNotif = await prisma.notification.create({
+      data: {
+        userId: userAlpha1Id,
+        type: NotificationType.ASSIGNED_STEP,
+        title: 'Thông báo đã SENT ban đầu',
+        content: 'Nội dung',
+        status: 'SENT',
+        retryCount: 0,
+        idempotencyKey: `ALREADY_SENT_TEST_${testSuffix}`,
+      },
+    });
+
+    await notificationService.retryFailedNotifications(3);
+
+    const checkSent = await prisma.notification.findUnique({ where: { id: sentNotif.id } });
+    expect(checkSent?.status).toBe('SENT');
+    expect(checkSent?.retryCount).toBe(0); // Không bị tăng
+  });
+
+  it('13. Tenant Isolation khi Admin trigger SLA: Quét chính xác trong phạm vi tổ chức, không rò rỉ dữ liệu sang tổ chức khác', async () => {
+    const now = new Date();
+    const overDueDate = new Date(now.getTime() - 6 * 60 * 60 * 1000);
+
+    // 1. Tạo hồ sơ quá hạn cho Tổ chức Alpha
+    const docAlpha = await createTestDocumentWithStep({
+      title: 'Hồ sơ quá hạn Alpha',
+      docNumber: `TK-ISO-A-${testSuffix}`,
+      dueDate: overDueDate,
+      assigneeUserId: userAlpha1Id,
+    });
+
+    // 2. Tạo hồ sơ quá hạn cho Tổ chức Beta
+    const docBeta = await prisma.document.create({
+      data: {
+        documentNumber: `TK-ISO-B-${testSuffix}`,
+        title: 'Hồ sơ quá hạn Beta',
+        templateId: formTemplateId,
+        workflowTemplateVersionId: workflowVersionId,
+        status: DocumentStatus.IN_REVIEW,
+        dueDate: overDueDate,
+        currentStepOrder: 1,
+        currentVersion: 1,
+        createdById: userBeta1Id,
+        organizationId: orgBetaId,
+      },
+    });
+
+    const wfBeta = await prisma.approvalWorkflow.create({
+      data: {
+        documentId: docBeta.id,
+        status: WorkflowStatus.RUNNING,
+        currentStepOrder: 1,
+      },
+    });
+
+    const stepBeta = await prisma.approvalStep.create({
+      data: {
+        workflowId: wfBeta.id,
+        stepOrder: 1,
+        stepName: 'Bước duyệt Beta',
+        status: StepStatus.IN_PROGRESS,
+        dueDate: overDueDate,
+        dueDays: 2,
+        startedAt: new Date(overDueDate.getTime() - 2 * 24 * 60 * 60 * 1000),
+      },
+    });
+
+    await prisma.stepAssignee.create({
+      data: {
+        stepId: stepBeta.id,
+        userId: userBeta1Id,
+        role: AssigneeRole.APPROVER,
+        decision: AssigneeDecision.PENDING,
+      },
+    });
+
+    // 3. Admin Alpha trigger quét SLA cho Tổ chức Alpha (targetOrgId = orgAlphaId)
+    const summaryAlpha = await slaSchedulerService.processSlaChecks(now, orgAlphaId);
+
+    // Bước của Alpha được gửi cảnh báo
+    const matchingAlpha = summaryAlpha.details.find((d) => d.stepId === docAlpha.step.id);
+    expect(matchingAlpha).toBeDefined();
+    expect(matchingAlpha?.status).toBe('SENT');
+
+    // Bước của Beta TUYỆT ĐỐI KHÔNG nằm trong lượt quét của Alpha
+    const matchingBetaInAlphaRun = summaryAlpha.details.find((d) => d.stepId === stepBeta.id);
+    expect(matchingBetaInAlphaRun).toBeUndefined();
+
+    // Thông báo trong DB của Beta chưa hề được tạo
+    const notifBetaBefore = await prisma.notification.findUnique({
+      where: { idempotencyKey: `SLA_OVERDUE:${stepBeta.id}:${userBeta1Id}` },
+    });
+    expect(notifBetaBefore).toBeNull();
+
+    // 4. Admin Beta trigger quét SLA cho Tổ chức Beta (targetOrgId = orgBetaId)
+    const summaryBeta = await slaSchedulerService.processSlaChecks(now, orgBetaId);
+    const matchingBeta = summaryBeta.details.find((d) => d.stepId === stepBeta.id);
+    expect(matchingBeta).toBeDefined();
+    expect(matchingBeta?.status).toBe('SENT');
+
+    const notifBetaAfter = await prisma.notification.findUnique({
+      where: { idempotencyKey: `SLA_OVERDUE:${stepBeta.id}:${userBeta1Id}` },
+    });
+    expect(notifBetaAfter).not.toBeNull();
+  });
 });
+

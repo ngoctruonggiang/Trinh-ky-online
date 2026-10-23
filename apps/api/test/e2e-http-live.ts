@@ -1016,13 +1016,50 @@ async function runLiveTests() {
   }
   console.log('   -> PASS (Phân trang và lọc isRead hoạt động chuẩn xác)\n');
 
+  // Test 39: USER thông thường bị chặn 403 khi gọi GET /api/workflows/sla/status
+  console.log('39. Test USER thông thường gọi GET /api/workflows/sla/status (Chặn 403 Forbidden):');
+  const resUserSlaStatus = await fetch(`${API_BASE}/workflows/sla/status`, {
+    headers: { Authorization: `Bearer ${tokenUserA}` },
+  });
+  console.log(`   HTTP Status: ${resUserSlaStatus.status}`);
+  if (resUserSlaStatus.status !== 403) {
+    throw new Error(`Test 39 thất bại: USER thường không bị chặn 403 khi xem SLA status (nhận ${resUserSlaStatus.status})`);
+  }
+  console.log('   -> PASS (Chặn USER thường truy cập thống kê giám sát SLA chuẩn xác)\n');
+
+  // Test 40: ADMIN kích hoạt retry thông báo lỗi qua Live HTTP (POST /api/notifications/retry-failed)
+  console.log('40. Test ADMIN kích hoạt POST /api/notifications/retry-failed thành công:');
+  const resRetryAdmin = await fetch(`${API_BASE}/notifications/retry-failed`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${tokenAdminA}` },
+  });
+  const bodyRetryAdmin = await resRetryAdmin.json();
+  console.log(`   HTTP Status: ${resRetryAdmin.status} | Retried Count: ${bodyRetryAdmin.data?.retriedCount}`);
+  if (resRetryAdmin.status !== 200 || !bodyRetryAdmin.success) {
+    throw new Error(`Test 40 thất bại: ADMIN không kích hoạt được retry-failed (nhận ${resRetryAdmin.status})`);
+  }
+  console.log('   -> PASS (ADMIN kích hoạt retry thông báo lỗi thành công)\n');
+
+  // Test 41: USER thông thường bị chặn 403 khi gọi POST /api/notifications/retry-failed
+  console.log('41. Test USER thông thường bị chặn 403 khi gọi POST /api/notifications/retry-failed:');
+  const resRetryUser = await fetch(`${API_BASE}/notifications/retry-failed`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${tokenUserA}` },
+  });
+  console.log(`   HTTP Status: ${resRetryUser.status}`);
+  if (resRetryUser.status !== 403) {
+    throw new Error(`Test 41 thất bại: USER thường không bị chặn 403 khi gọi retry-failed (nhận ${resRetryUser.status})`);
+  }
+  console.log('   -> PASS (Chặn USER thường kích hoạt retry-failed chuẩn RBAC)\n');
+
   await prisma.$disconnect();
   console.log('========================================================================');
-  console.log('🎉 TẤT CẢ 38/38 KỊCH BẢN KIỂM THỬ LIVE HTTP & SECURITY TRÊN POSTGRESQL');
-  console.log('   (BAO GỒM REASSIGNMENT, SLA SCHEDULER & NOTIFICATION IDEMPOTENCY)');
+  console.log('🎉 TẤT CẢ 41/41 KỊCH BẢN KIỂM THỬ LIVE HTTP & SECURITY TRÊN POSTGRESQL');
+  console.log('   (BAO GỒM REASSIGNMENT, SLA SCHEDULER & NOTIFICATION RETRY/IDEMPOTENCY)');
   console.log('   ĐÃ PASS 100%!');
   console.log('========================================================================');
 }
+
 
 runLiveTests().catch((err) => {
   console.error('\n❌ Lỗi khi chạy live test:', err);

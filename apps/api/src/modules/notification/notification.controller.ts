@@ -1,12 +1,14 @@
 import {
   Controller,
   Get,
+  Post,
   HttpCode,
   HttpStatus,
   Param,
   Patch,
   Query,
   UseGuards,
+  ForbiddenException,
 } from '@nestjs/common';
 import { AuthGuard } from '../../common/guards/auth.guard.js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
@@ -93,4 +95,24 @@ export class NotificationController {
       timestamp: new Date().toISOString(),
     };
   }
+
+  /**
+   * Kích hoạt thử lại gửi các thông báo bị lỗi (FAILED) hoặc đang chờ (PENDING)
+   * POST /api/notifications/retry-failed
+   */
+  @Post('retry-failed')
+  @HttpCode(HttpStatus.OK)
+  async retryFailedNotifications(@CurrentUser() user: UserPrincipal) {
+    if (user.role !== 'SUPER_ADMIN' && user.role !== 'ADMIN') {
+      throw new ForbiddenException('Chỉ quản trị viên mới có quyền kích hoạt thử lại gửi thông báo.');
+    }
+
+    const result = await this.notificationService.retryFailedNotifications();
+    return {
+      success: true,
+      data: result,
+      timestamp: new Date().toISOString(),
+    };
+  }
 }
+

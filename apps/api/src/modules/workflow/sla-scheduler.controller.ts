@@ -34,7 +34,9 @@ export class SlaSchedulerController {
       throw new ForbiddenException('Chỉ quản trị viên mới có quyền kích hoạt kiểm tra SLA.');
     }
 
-    const summary = await this.slaSchedulerService.processSlaChecks();
+    // Tenant Isolation: ADMIN chỉ quét trong phạm vi tổ chức của mình; SUPER_ADMIN quét toàn hệ thống
+    const targetOrgId = user.role === 'ADMIN' ? user.organizationId : undefined;
+    const summary = await this.slaSchedulerService.processSlaChecks(new Date(), targetOrgId);
     return {
       success: true,
       data: summary,
@@ -49,6 +51,11 @@ export class SlaSchedulerController {
   @Get('status')
   @HttpCode(HttpStatus.OK)
   async getSlaStatus(@CurrentUser() user: UserPrincipal) {
+    // Chỉ SUPER_ADMIN hoặc ADMIN mới có quyền truy cập dữ liệu giám sát SLA
+    if (user.role !== 'SUPER_ADMIN' && user.role !== 'ADMIN') {
+      throw new ForbiddenException('Chỉ quản trị viên mới có quyền xem thống kê giám sát SLA.');
+    }
+
     const now = new Date();
     const nearDueThreshold = new Date(now.getTime() + 24 * 60 * 60 * 1000);
 
@@ -90,3 +97,4 @@ export class SlaSchedulerController {
     };
   }
 }
+
