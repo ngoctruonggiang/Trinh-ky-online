@@ -825,5 +825,82 @@ Hệ thống thông báo nội bộ module hóa phục vụ gửi thông báo th
 }
 ```
 
+---
+
+### 8.4. SLA Scheduler & Giám sát Tự động (Phase 12.0.1)
+
+Hệ thống cung cấp service quét định kỳ (mặc định mỗi 5 phút) và endpoint kích hoạt quét hoặc giám sát thời gian thực.
+
+#### ① Kích hoạt quét SLA thủ công / Worker
+- **Endpoint:** `POST /api/workflows/sla/trigger-check`
+- **Quyền hạn:** `SUPER_ADMIN` hoặc `ADMIN`. Người dùng thường bị từ chối `403 Forbidden`.
+- **Response Thành Công (200 OK):**
+```json
+{
+  "success": true,
+  "data": {
+    "scannedStepsCount": 12,
+    "warningsSent": 2,
+    "overduesSent": 1,
+    "skippedAlreadySent": 9,
+    "errorsCount": 0,
+    "processedAt": "2026-10-23T10:30:00.000Z",
+    "details": [
+      {
+        "stepId": "step-uuid-1",
+        "stepName": "Trưởng phòng duyệt",
+        "documentId": "doc-uuid-1",
+        "documentNumber": "TK-2026-001",
+        "type": "SLA_WARNING",
+        "userId": "user-uuid-1",
+        "idempotencyKey": "SLA_WARNING:step-uuid-1:user-uuid-1",
+        "status": "SENT"
+      }
+    ]
+  },
+  "timestamp": "2026-10-23T10:30:00.000Z"
+}
+```
+
+#### ② Truy vấn trạng thái giám sát SLA
+- **Endpoint:** `GET /api/workflows/sla/status`
+- **Quyền hạn:** Mọi người dùng đã xác thực (Admin/User xem trong phạm vi tổ chức của mình, Super Admin xem toàn hệ thống).
+- **Response Thành Công (200 OK):**
+```json
+{
+  "success": true,
+  "data": {
+    "totalInReview": 24,
+    "onTrackCount": 18,
+    "nearDueCount": 4,
+    "overdueCount": 2,
+    "checkedAt": "2026-10-23T10:30:00.000Z"
+  },
+  "timestamp": "2026-10-23T10:30:00.000Z"
+}
+```
+
+---
+
+### 8.5. Cơ chế Idempotency Bền vững & Bảo mật Notification
+
+1. **Database-backed Idempotency:**
+   - Mỗi thông báo hệ thống được gán một `idempotencyKey` duy nhất có ràng buộc `@unique` tại PostgreSQL.
+   - Định dạng chuẩn:
+     - Nhắc nhở sắp đến hạn: `SLA_WARNING:${stepId}:${userId}`
+     - Cảnh báo quá hạn: `SLA_OVERDUE:${stepId}:${userId}`
+     - Phân công duyệt: `ASSIGNED_STEP:${stepId}:${userId}`
+     - Chuyển giao duyệt: `REASSIGNED_TO:${stepId}:${newUserId}:${historyId}`
+   - Khi chạy lặp hoặc nhiều worker chạy đồng thời, PostgreSQL ngăn chặn tuyệt đối việc chèn trùng lặp; backend bắt mã lỗi `P2002` và xử lý an toàn dưới dạng no-op.
+2. **Khóa Hàng Bi quan (Row-Level Locking):**
+   - Quá trình quét SLA khóa bước duyệt bằng `SELECT id FROM approval_steps WHERE id = :id FOR UPDATE`.
+   - Nếu bước duyệt chuyển sang `COMPLETED`, `CANCELLED` hoặc `REJECTED` trong lúc chờ khóa, scheduler tự động bỏ qua, không gửi cảnh báo cho bước đã kết thúc.
+3. **Khả năng Khôi phục sau Restart (Restart Resilience):**
+   - Nếu server khởi động lại giữa lúc đang tạo thông báo, toàn bộ transaction PostgreSQL được rollback an toàn, không để lại bản ghi rác. Lần quét tiếp theo của scheduler sẽ tự động nhận diện và xử lý lại đầy đủ.
+4. **Bảo mật Ranh giới Thông báo (Notification Security Boundary):**
+   - Người dùng chỉ được phép truy vấn và đánh dấu đã đọc (`PATCH /api/notifications/:id/read`) đối với thông báo do chính mình sở hữu. Thao tác trên thông báo của người khác bị từ chối `403 Forbidden`.
+   - Thông báo không tồn tại trả về `404 Not Found`.
+   - Không chứa bất kỳ dữ liệu nhạy cảm hoặc nội dung chi tiết biểu mẫu nào trong payload thông báo.
+
 
 

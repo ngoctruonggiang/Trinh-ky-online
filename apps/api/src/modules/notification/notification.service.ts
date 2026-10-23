@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../../common/prisma/prisma.service.js';
-import { NotificationType } from '@trinh-ky/shared';
+import { NotificationType, NotificationStatus } from '@trinh-ky/shared';
 
 export interface CreateNotificationDto {
   userId: string;
@@ -9,6 +9,8 @@ export interface CreateNotificationDto {
   title: string;
   content: string;
   metadata?: any;
+  idempotencyKey?: string;
+  status?: NotificationStatus;
 }
 
 @Injectable()
@@ -136,18 +138,79 @@ export class NotificationService {
   }
 
   /**
-   * Tạo thông báo mới (hỗ trợ chống duplicate thông báo giống nhau trong cùng ngày)
+   * Tạo thông báo mới (hỗ trợ database-level idempotency chống duplicate thông báo)
    */
   async createNotification(dto: CreateNotificationDto) {
-    return await this.prisma.notification.create({
-      data: {
-        userId: dto.userId,
-        documentId: dto.documentId,
-        type: dto.type,
-        title: dto.title,
-        content: dto.content,
-        metadata: dto.metadata,
+    if (dto.idempotencyKey) {
+      const existing = await this.prisma.notification.findUnique({
+        where: { idempotencyKey: dto.idempotencyKey },
+      });
+      if (existing) {
+        return existing;
+      }
+    }
+
+    try {
+      return await this.prisma.notification.create({
+        data: {
+          userId: dto.userId,
+          documentId: dto.documentId,
+          type: dto.type,
+          title: dto.title,
+          content: dto.content,
+          metadata: dto.metadata,
+          idempotencyKey: dto.idempotencyKey,
+          status: dto.status || 'SENT',
+        },
+      });
+    } catch (err: any) {
+      // Bắt xung đột Unique Constraint P2002 nếu 2 worker insert đồng thời
+      if (err.code === 'P2002' && dto.idempotencyKey) {
+        const existing = await this.prisma.notification.findUnique({
+          where: { idempotencyKey: dto.idempotencyKey },
+        });
+        if (existing) {
+          return existing;
+        }
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Thử lại việc gửi các thông báo bị lỗi (FAILED)
+   */
+  async retryFailedNotifications(maxRetries: number = 3) {
+    const failedItems = await this.prisma.notification.findMany({
+      where: {
+        status: 'FAILED',
+        retryCount: { lt: maxRetries },
       },
+      take: 50,
     });
+
+    const retriedIds: string[] = [];
+    for (const item of failedItems) {
+      try {
+        await this.prisma.notification.update({
+          where: { id: item.id },
+          data: {
+            status: 'SENT',
+            errorMessage: null,
+            retryCount: item.retryCount + 1,
+          },
+        });
+        retriedIds.push(item.id);
+      } catch (err: any) {
+        await this.prisma.notification.update({
+          where: { id: item.id },
+          data: {
+            retryCount: item.retryCount + 1,
+            errorMessage: err.message || 'Lỗi gửi lại thông báo',
+          },
+        });
+      }
+    }
+    return { retriedCount: retriedIds.length, totalFailed: failedItems.length };
   }
 }

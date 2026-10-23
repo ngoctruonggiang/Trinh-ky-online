@@ -104,3 +104,9 @@ export enum NotificationType {
   SLA_OVERDUE = 'SLA_OVERDUE',
 }
 
+export enum NotificationStatus {
+  PENDING = 'PENDING',
+  SENT = 'SENT',
+  FAILED = 'FAILED',
+}
+

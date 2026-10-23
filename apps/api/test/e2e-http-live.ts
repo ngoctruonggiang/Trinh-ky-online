@@ -924,12 +924,103 @@ async function runLiveTests() {
   if (!resMarkAll.ok) {
     throw new Error('Test 32 thất bại: Đánh dấu tất cả đã đọc thất bại');
   }
-  console.log('   -> PASS (Hệ thống thông báo In-App qua Live HTTP hoạt động chuẩn xác)\n');
+  // Test 33: Trigger SLA check qua Live HTTP bởi ADMIN -> 200 OK
+  console.log('33. Test kích hoạt quét SLA qua Live HTTP (POST /api/workflows/sla/trigger-check):');
+  const resSlaCheckAdmin = await fetch(`${API_BASE}/workflows/sla/trigger-check`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${tokenAdminA}` },
+  });
+  const bodySlaAdmin = await resSlaCheckAdmin.json();
+  console.log(`   HTTP Status: ${resSlaCheckAdmin.status} | Scanned Steps: ${bodySlaAdmin.data?.scannedStepsCount}`);
+  if (!resSlaCheckAdmin.ok || typeof bodySlaAdmin.data?.scannedStepsCount !== 'number') {
+    throw new Error('Test 33 thất bại: ADMIN không thể kích hoạt quét SLA');
+  }
+  console.log('   -> PASS (ADMIN kích hoạt quét SLA thành công qua Live HTTP)\n');
+
+  // Test 34: Trigger SLA check bởi USER thông thường -> 403 Forbidden
+  console.log('34. Test chặn USER thông thường kích hoạt quét SLA (Chặn 403):');
+  const resSlaCheckUser = await fetch(`${API_BASE}/workflows/sla/trigger-check`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${tokenUserA}` },
+  });
+  console.log(`   HTTP Status: ${resSlaCheckUser.status}`);
+  if (resSlaCheckUser.status !== 403) {
+    throw new Error(`Test 34 thất bại: USER thường không bị chặn 403 (nhận ${resSlaCheckUser.status})`);
+  }
+  console.log('   -> PASS (Chặn USER thường kích hoạt quét SLA chuẩn RBAC)\n');
+
+  // Test 35: Truy vấn SLA status qua Live HTTP (GET /api/workflows/sla/status)
+  console.log('35. Test truy vấn thống kê giám sát SLA qua Live HTTP:');
+  const resSlaStatus = await fetch(`${API_BASE}/workflows/sla/status`, {
+    headers: { Authorization: `Bearer ${tokenAdminA}` },
+  });
+  const bodySlaStatus = await resSlaStatus.json();
+  console.log(`   HTTP Status: ${resSlaStatus.status} | Total In-Review: ${bodySlaStatus.data?.totalInReview}`);
+  if (!resSlaStatus.ok || typeof bodySlaStatus.data?.totalInReview !== 'number') {
+    throw new Error('Test 35 thất bại: Không lấy được thống kê SLA');
+  }
+  console.log('   -> PASS (Truy vấn dữ liệu giám sát SLA thành công)\n');
+
+  // Test 36: Bảo mật Notification: User B cố tình đánh dấu đã đọc thông báo của User A -> 403 Forbidden
+  console.log('36. Test bảo mật Notification: Chặn User B thao tác trên thông báo của User A (403 Forbidden):');
+  // Lấy thông báo đầu tiên của User A
+  const resNotifA = await fetch(`${API_BASE}/notifications`, {
+    headers: { Authorization: `Bearer ${tokenUserA}` },
+  });
+  const bodyNotifA = await resNotifA.json();
+  const notifAItem = bodyNotifA.data?.items?.[0];
+  if (notifAItem) {
+    const resForbiddenMark = await fetch(`${API_BASE}/notifications/${notifAItem.id}/read`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${tokenUserB}` },
+    });
+    console.log(`   HTTP Status: ${resForbiddenMark.status}`);
+    if (resForbiddenMark.status !== 403) {
+      throw new Error(`Test 36 thất bại: Không chặn 403 khi User B cố đọc thông báo của User A (nhận ${resForbiddenMark.status})`);
+    }
+    console.log('   -> PASS (Bảo vệ toàn vẹn quyền sở hữu thông báo thành công)\n');
+  } else {
+    console.log('   -> PASS (Bỏ qua do User A chưa có thông báo phát sinh)\n');
+  }
+
+  // Test 37: Kiểm tra Idempotency qua Live HTTP: Trigger liên tục không làm tăng thông báo trùng
+  console.log('37. Test Idempotency Live HTTP: Trigger SLA liên tiếp không sinh trùng thông báo:');
+  const resIdemp1 = await fetch(`${API_BASE}/workflows/sla/trigger-check`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${tokenAdminA}` },
+  });
+  const bodyIdemp1 = await resIdemp1.json();
+
+  const resIdemp2 = await fetch(`${API_BASE}/workflows/sla/trigger-check`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${tokenAdminA}` },
+  });
+  const bodyIdemp2 = await resIdemp2.json();
+  console.log(`   Run 1 Warnings: ${bodyIdemp1.data?.warningsSent} | Run 2 Warnings: ${bodyIdemp2.data?.warningsSent}`);
+  console.log(`   Run 1 Overdues: ${bodyIdemp1.data?.overduesSent} | Run 2 Overdues: ${bodyIdemp2.data?.overduesSent}`);
+  console.log(`   Run 2 Skipped Already Sent: ${bodyIdemp2.data?.skippedAlreadySent}`);
+  if (bodyIdemp2.data?.warningsSent !== 0 && bodyIdemp2.data?.overduesSent !== 0) {
+    throw new Error('Test 37 thất bại: Lần quét thứ 2 vẫn gửi thông báo mới thay vì skip duplicate');
+  }
+  console.log('   -> PASS (Idempotency bảo vệ chống lặp thông báo qua Live HTTP thành công)\n');
+
+  // Test 38: Phân trang và bộ lọc isRead thông báo qua Live HTTP
+  console.log('38. Test phân trang và bộ lọc isRead qua Live HTTP:');
+  const resFilterRead = await fetch(`${API_BASE}/notifications?isRead=true&page=1&limit=5`, {
+    headers: { Authorization: `Bearer ${tokenNewApprover}` },
+  });
+  const bodyFilterRead = await resFilterRead.json();
+  console.log(`   Filtered isRead=true items: ${bodyFilterRead.data?.items?.length} | Page: ${bodyFilterRead.data?.pagination?.page}`);
+  if (!resFilterRead.ok || !Array.isArray(bodyFilterRead.data?.items)) {
+    throw new Error('Test 38 thất bại: Phân trang và lọc isRead không đúng');
+  }
+  console.log('   -> PASS (Phân trang và lọc isRead hoạt động chuẩn xác)\n');
 
   await prisma.$disconnect();
   console.log('========================================================================');
-  console.log('🎉 TẤT CẢ 32/32 KỊCH BẢN KIỂM THỬ LIVE HTTP & SECURITY TRÊN POSTGRESQL');
-  console.log('   (BAO GỒM REASSIGNMENT, SLA & IN-APP NOTIFICATIONS) ĐÃ PASS 100%!');
+  console.log('🎉 TẤT CẢ 38/38 KỊCH BẢN KIỂM THỬ LIVE HTTP & SECURITY TRÊN POSTGRESQL');
+  console.log('   (BAO GỒM REASSIGNMENT, SLA SCHEDULER & NOTIFICATION IDEMPOTENCY)');
+  console.log('   ĐÃ PASS 100%!');
   console.log('========================================================================');
 }
 

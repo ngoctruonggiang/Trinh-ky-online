@@ -151,5 +151,61 @@ describe('NotificationService (In-App Notification Engine)', () => {
         })
       );
     });
+
+    it('3.2. Idempotency: Không tạo thông báo trùng nếu idempotencyKey đã tồn tại', async () => {
+      mockPrisma.notification.findUnique.mockResolvedValue({
+        id: 'notif-existing',
+        idempotencyKey: 'SLA_OVERDUE:step-1:user-2',
+        title: 'Cảnh báo quá hạn',
+      });
+
+      const notif = await service.createNotification({
+        userId: 'user-2',
+        type: NotificationType.SLA_OVERDUE,
+        title: 'Cảnh báo quá hạn',
+        content: 'Nội dung',
+        idempotencyKey: 'SLA_OVERDUE:step-1:user-2',
+      });
+
+      expect(notif.id).toBe('notif-existing');
+      expect(mockPrisma.notification.create).not.toHaveBeenCalled();
+    });
+
+    it('3.3. Idempotency Concurrency: Bắt lỗi P2002 khi 2 worker insert đồng thời và trả về bản ghi đã có', async () => {
+      mockPrisma.notification.findUnique
+        .mockResolvedValueOnce(null) // lần đầu findUnique trả về null
+        .mockResolvedValueOnce({ id: 'notif-inserted-by-other-worker', idempotencyKey: 'SLA_OVERDUE:step-1:user-2' }); // sau khi catch P2002 thì tìm thấy
+
+      const p2002Error: any = new Error('Unique constraint failed');
+      p2002Error.code = 'P2002';
+      mockPrisma.notification.create.mockRejectedValueOnce(p2002Error);
+
+      const notif = await service.createNotification({
+        userId: 'user-2',
+        type: NotificationType.SLA_OVERDUE,
+        title: 'Cảnh báo quá hạn',
+        content: 'Nội dung',
+        idempotencyKey: 'SLA_OVERDUE:step-1:user-2',
+      });
+
+      expect(notif.id).toBe('notif-inserted-by-other-worker');
+    });
+
+    it('3.4. retryFailedNotifications thử lại các thông báo bị FAILED thành công', async () => {
+      mockPrisma.notification.findMany.mockResolvedValue([
+        { id: 'notif-failed-1', retryCount: 0, status: 'FAILED' },
+      ]);
+      mockPrisma.notification.update.mockResolvedValue({ id: 'notif-failed-1', status: 'SENT' });
+
+      const result = await service.retryFailedNotifications();
+      expect(result.retriedCount).toBe(1);
+      expect(result.totalFailed).toBe(1);
+      expect(mockPrisma.notification.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'notif-failed-1' },
+          data: expect.objectContaining({ status: 'SENT', retryCount: 1 }),
+        })
+      );
+    });
   });
 });
