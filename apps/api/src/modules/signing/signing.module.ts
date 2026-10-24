@@ -1,18 +1,23 @@
 import { Module } from '@nestjs/common';
-import { PrismaClient } from '@prisma/client';
+import { PrismaService } from '../../common/prisma/prisma.service.js';
 import { CertificateController } from './certificate.controller.js';
+import { DocumentSigningController } from './document-signing.controller.js';
 import { CertificateRegistryService } from './certificate-registry.service.js';
 import { DevLocalKeystoreProvider } from './providers/dev-local-keystore.provider.js';
 import { CloudKmsSigningProvider } from './providers/cloud-kms-signing.provider.js';
 import { SIGNING_KEY_PROVIDER } from './providers/signing-key-provider.interface.js';
+import { ArtifactModule } from '../artifact/artifact.module.js';
+import { PdfSigningService } from './engine/pdf-signing.service.js';
 
 @Module({
-  controllers: [CertificateController],
+  imports: [ArtifactModule],
+  controllers: [CertificateController, DocumentSigningController],
   providers: [
-    PrismaClient,
+    PrismaService,
     CertificateRegistryService,
     DevLocalKeystoreProvider,
     CloudKmsSigningProvider,
+    PdfSigningService,
     {
       provide: SIGNING_KEY_PROVIDER,
       useExisting: DevLocalKeystoreProvider,
@@ -22,6 +27,7 @@ import { SIGNING_KEY_PROVIDER } from './providers/signing-key-provider.interface
     CertificateRegistryService,
     DevLocalKeystoreProvider,
     CloudKmsSigningProvider,
+    PdfSigningService,
     SIGNING_KEY_PROVIDER,
   ],
 })

@@ -204,5 +204,42 @@ export interface UpdateCertificateStatusDto {
   reason?: string;
 }
 
+export interface SignDocumentDto {
+  certificateId?: string;
+  reason?: string;
+  contactInfo?: string;
+  location?: string;
+  versionNumber?: number;
+}
 
+export interface SignDocumentResultView {
+  artifactId: string;
+  documentId: string;
+  documentVersionId: string;
+  status: ArtifactStatus;
+  signedPdfHash: string;
+  rawPdfHash: string;
+  formDataHash: string;
+  sizeBytes: number;
+  byteRange: number[];
+  signerSubject: string;
+  signerIssuer: string;
+  signingTime: string;
+  isSignatureVerified: boolean;
+  downloadUrl: string;
+}
 
+export interface PdfSignatureVerificationResult {
+  isValid: boolean;
+  isDigestValid: boolean;
+  isSignatureValid: boolean;
+  isTampered: boolean;
+  signerSubject?: string;
+  signerIssuer?: string;
+  serialNumber?: string;
+  signingTime?: string;
+  byteRange?: number[];
+  messageDigestHex?: string;
+  computedDigestHex?: string;
+  errorMessage?: string;
+}

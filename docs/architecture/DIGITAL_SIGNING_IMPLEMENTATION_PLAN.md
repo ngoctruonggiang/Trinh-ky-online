@@ -286,5 +286,30 @@ Dựa trên kết quả triển khai và kiểm thử thực tế của Phase 13
    - Không có hồi quy (Zero Regression) trên toàn bộ monorepo.
 6. **Ranh giới Thực thi Rõ ràng**: Chưa tuyên bố có chữ ký số PDF PAdES trong Phase 13.2.1; không tự động ký khi văn bản `APPROVED`.
 
-### **KẾT LUẬN CUỐI CÙNG: GO CHO PHASE 13.2.2**
-Hệ thống chính thức đủ điều kiện và sẵn sàng bước vào **Phase 13.2.2: Triển khai CMS/PAdES PDF Signing Engine, ByteRange Placeholder & Incremental Updates**.
+### **KẾT LUẬN CHO PHASE 13.2.2: ĐÃ HOÀN THÀNH XUẤT SẮC (COMPLETED)**
+
+---
+
+## 7. BÁO CÁO NGHIỆM THU PHASE 13.2.2 — CMS/PDF SIGNING ENGINE
+
+Dựa trên kết quả triển khai và kiểm thử thực tế của Phase 13.2.2:
+
+### 7.1. Đánh giá Tiêu chí Đạt (Pass Criteria):
+1. **CMS Detached Signature Generator (`CmsSignatureBuilder`)**: Đạt chuẩn RFC 5652 `signedData`, `id-data` không chứa `eContent`, sắp xếp từ điển SignedAttributes, băm 32-byte digest và ký qua `ISigningKeyProvider.signDigest`. Xác minh thành công 100% bằng OpenSSL CLI với cờ `-binary`. $\rightarrow$ **ĐẠT (PASS)**.
+2. **PDF Signature Adapter (`PdfSignatureAdapter`)**: Cấp phát `/Type /Sig`, `/Filter /Adobe.PPKLite`, `/SubFilter /adbe.pkcs7.detached`, vùng đệm `/Contents` và tính toán `/ByteRange` nhị phân chính xác. Chống tràn placeholder an toàn (Fail-safe overflow check). $\rightarrow$ **ĐẠT (PASS)**.
+3. **Trình Xác minh Độc lập (`PdfSignatureVerifier`)**: Tự động giải mã ByteRange, băm lại toàn bộ byte được ký, trích xuất `messageDigest` và xác minh chữ ký RSA bằng khóa công khai X.509 nhúng. Phát hiện can thiệp nhị phân cấp byte (Tamper Detection) tức thì. $\rightarrow$ **ĐẠT (PASS)**.
+4. **Điều phối Ký an toàn (`PdfSigningService`)**: Sử dụng PostgreSQL Advisory Lock chống ký đồng thời, xác minh tệp chưa ký khớp `rawPdfHash`, kiểm tra trạng thái chứng thư (`ACTIVE`, còn hạn, sở hữu hợp lệ), thực hiện self-verification bắt buộc trước khi ghi storage và commit CSDL (Fail-closed). $\rightarrow$ **ĐẠT (PASS)**.
+5. **Bảo toàn Tệp & Phân định Rõ ràng 3 Mã Băm**:
+   - `formDataHash`: Hash cấu trúc dữ liệu biểu mẫu JSON.
+   - `rawPdfHash`: SHA-256 của tệp PDF gốc chưa ký `OFFICIAL_UNSIGNED` (bảo toàn 100%, không bao giờ bị ghi đè).
+   - `signedPdfHash`: SHA-256 của toàn bộ tệp PDF đã ký số `SIGNED_PDF`.
+6. **Kiểm thử Toàn diện**:
+   - **199/199 Unit Tests** (19 suites) PASS 100%.
+   - **126/126 PostgreSQL Integration Tests** (11 suites) PASS 100%.
+   - **80/80 Live HTTP E2E Tests** (100%) PASS trên server NestJS và PostgreSQL vật lý.
+   - **OpenSSL 3.5.7 CLI Detached Verification**: `CMS Verification successful`.
+   - **Zero Regression**: Shared (47/47), Web (46/46), Monorepo build PASS 100%.
+7. **Ranh giới Kỹ thuật**: Chưa có RFC 3161 TSA; chưa triển khai DSS/VRI/LTV; chưa tự động ký khi văn bản chuyển sang `APPROVED`.
+
+### **KẾT LUẬN CUỐI CÙNG: GO CHO PHASE 13.3**
+Hệ thống chính thức đủ điều kiện và sẵn sàng bước vào **Phase 13.3: Dịch vụ Dấu thời gian Tin cậy RFC 3161 TSA & Cổng Xác minh Chữ ký Số Độc lập (Public Verification Portal)**.

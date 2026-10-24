@@ -389,15 +389,23 @@ export class ArtifactService {
     // Đọc nhị phân từ Storage
     const buffer = await this.storageService.get(artifact.storageKey);
 
-    // Đối soát tính toàn vẹn nhị phân: Băm lại SHA-256 từ byte đọc được so với rawPdfHash trong CSDL
+    // Đối soát tính toàn vẹn nhị phân: Băm lại SHA-256 từ byte đọc được so với hash trong CSDL
     const currentHash = crypto.createHash('sha256').update(buffer).digest('hex');
-    if (artifact.rawPdfHash && currentHash !== artifact.rawPdfHash) {
+    const expectedHash =
+      artifactType === ArtifactType.SIGNED_PDF ? artifact.signedPdfHash : artifact.rawPdfHash;
+
+    if (expectedHash && currentHash !== expectedHash) {
       throw new InternalServerErrorException(
         'CẢNH BÁO TOÀN VẸN: Mã băm SHA-256 của tệp trong kho lưu trữ không khớp với dữ liệu kiểm toán.'
       );
     }
 
-    const typeSuffix = artifactType === ArtifactType.PREVIEW ? '_preview' : '';
+    const typeSuffix =
+      artifactType === ArtifactType.PREVIEW
+        ? '_preview'
+        : artifactType === ArtifactType.SIGNED_PDF
+        ? '_signed'
+        : '';
     const fileName = `${document.documentNumber}_v${verNum}${typeSuffix}.pdf`;
 
     return {

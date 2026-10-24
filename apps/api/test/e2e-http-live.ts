@@ -4,6 +4,7 @@ import { JwtUtil } from '../src/common/utils/jwt.util.js';
 import { UserRole } from '@trinh-ky/shared';
 import { DevKeystoreGenerator } from '../src/modules/signing/dev-keystore-generator.js';
 import { DevLocalKeystoreProvider } from '../src/modules/signing/providers/dev-local-keystore.provider.js';
+import { StorageService } from '../src/modules/artifact/storage/storage.service.js';
 
 const API_BASE = 'http://localhost:4000/api';
 const JWT_SECRET = 'dev-jwt-secret-key-change-in-production-min-32-chars';
@@ -1676,16 +1677,275 @@ async function runLiveTests() {
   }
   console.log('   -> PASS (Chặn hoàn toàn hành vi ký bằng chứng thư bị thu hồi)\n');
 
+  // =========================================================================
+  // --- BẮT ĐẦU KIỂM THỬ PHASE 13.2.2: CMS/PDF SIGNING ENGINE ---
+  // =========================================================================
+  console.log('--- BẮT ĐẦU KIỂM THỬ PHASE 13.2.2: CMS/PDF SIGNING ENGINE ---');
+
+  // Đăng ký một chứng thư số ACTIVE mới cho User A để phục vụ ký số văn bản thật
+  const signingKeystoreUserA = DevKeystoreGenerator.generateSelfSignedKeystore({
+    commonName: userA.fullName,
+    organizationName: 'Tập đoàn VinaGroup (HQ)',
+  });
+  const keyAliasLiveSigningA = `key_live_signing_a_${Date.now()}`;
+  liveKeystoreProvider.importKeystore(keyAliasLiveSigningA, signingKeystoreUserA.p12Buffer);
+
+  const resRegSignCert = await fetch(`${API_BASE}/certificates`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenAdminA}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      userId: userA.id,
+      certificatePem: signingKeystoreUserA.certificatePem,
+      keyAlias: keyAliasLiveSigningA,
+      keyStorageType: 'DEV_KEYSTORE',
+    }),
+  });
+  const bodyRegSignCert = await resRegSignCert.json();
+  const activeCertA = bodyRegSignCert.data;
+  console.log(`   Chuẩn bị Active Signing Cert cho User A: ${activeCertA?.id} (${activeCertA?.status})`);
+
+  // Test 71: POST /api/documents/:id/sign - User A ký số hồ sơ thật
+  console.log('71. Test POST /api/documents/:id/sign (Ký số PDF thật bằng CMS detached):');
+  const resSignDoc = await fetch(`${API_BASE}/documents/${createdDocWithWf.id}/sign`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenUserA}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      certificateId: activeCertA.id,
+      reason: 'Phê duyệt tờ trình quyết toán dự án Live E2E 2026',
+      location: 'Hà Nội, Việt Nam',
+    }),
+  });
+  const bodySignDoc = await resSignDoc.json();
+  const signResult = bodySignDoc.data;
+  console.log(`   HTTP Status: ${resSignDoc.status} | ArtifactId: ${signResult?.artifactId}`);
+  console.log(`   SignedPdfHash: ${signResult?.signedPdfHash?.slice(0, 16)}... | RawPdfHash: ${signResult?.rawPdfHash?.slice(0, 16)}...`);
+  console.log(`   ByteRange: [${signResult?.byteRange?.join(', ')}] | Status: ${signResult?.status}`);
+  if (
+    resSignDoc.status !== 200 ||
+    !signResult?.signedPdfHash ||
+    signResult.signedPdfHash.length !== 64 ||
+    signResult.signedPdfHash === signResult.rawPdfHash ||
+    !Array.isArray(signResult.byteRange) ||
+    signResult.byteRange.length !== 4 ||
+    signResult.status !== 'COMPLETED'
+  ) {
+    throw new Error(`Test 71 thất bại: Ký số hồ sơ không thành công: ${JSON.stringify(bodySignDoc)}`);
+  }
+  console.log('   -> PASS (Ký số PDF thành công với CMS detached và cấu trúc ByteRange chuẩn xác)\n');
+
+  // Test 72: GET /api/documents/:id/verify-signature - Xác minh độc lập chữ ký số
+  console.log('72. Test GET /api/documents/:id/verify-signature (Xác minh độc lập chữ ký số mật mã):');
+  const resVerifySig = await fetch(`${API_BASE}/documents/${createdDocWithWf.id}/verify-signature`, {
+    headers: { Authorization: `Bearer ${tokenUserA}` },
+  });
+  const bodyVerifySig = await resVerifySig.json();
+  const verifyData = bodyVerifySig.data;
+  console.log(`   HTTP Status: ${resVerifySig.status} | Valid: ${verifyData?.isValid} | Tampered: ${verifyData?.isTampered}`);
+  console.log(`   DigestValid: ${verifyData?.isDigestValid} | SigValid: ${verifyData?.isSignatureValid} | SignerSubject: ${verifyData?.signerSubject}`);
+  if (
+    resVerifySig.status !== 200 ||
+    verifyData?.isValid !== true ||
+    verifyData?.isTampered !== false ||
+    verifyData?.isDigestValid !== true ||
+    verifyData?.isSignatureValid !== true
+  ) {
+    throw new Error(`Test 72 thất bại: Xác minh chữ ký không hợp lệ: ${JSON.stringify(bodyVerifySig)}`);
+  }
+  console.log('   -> PASS (Xác minh độc lập thành công: Tính toàn vẹn và chữ ký RSA đều hợp lệ)\n');
+
+  // Test 73: GET /api/documents/:id/signed-pdf - Tải tệp PDF đã ký số
+  console.log('73. Test GET /api/documents/:id/signed-pdf (Tải tệp PDF đã ký số có kiểm soát phân quyền):');
+  const resDownloadSigned = await fetch(`${API_BASE}/documents/${createdDocWithWf.id}/signed-pdf`, {
+    headers: { Authorization: `Bearer ${tokenUserA}` },
+  });
+  console.log(`   HTTP Status: ${resDownloadSigned.status} | Content-Type: ${resDownloadSigned.headers.get('content-type')}`);
+  if (
+    resDownloadSigned.status !== 200 ||
+    resDownloadSigned.headers.get('content-type') !== 'application/pdf'
+  ) {
+    throw new Error('Test 73 thất bại: Không tải được tệp PDF đã ký');
+  }
+  const downloadedSignedArrayBuffer = await resDownloadSigned.arrayBuffer();
+  const downloadedSignedBuffer = Buffer.from(downloadedSignedArrayBuffer);
+  const downloadedHash = crypto.createHash('sha256').update(downloadedSignedBuffer).digest('hex');
+  console.log(`   Downloaded size: ${downloadedSignedBuffer.length} bytes | Magic: ${downloadedSignedBuffer.subarray(0, 5).toString('ascii')}`);
+  console.log(`   Downloaded SHA-256: ${downloadedHash.slice(0, 16)}...`);
+  if (
+    downloadedSignedBuffer.subarray(0, 5).toString('ascii') !== '%PDF-' ||
+    downloadedHash !== signResult.signedPdfHash
+  ) {
+    throw new Error('Test 73 thất bại: Nội dung tệp PDF tải về không khớp mã băm signedPdfHash');
+  }
+  console.log('   -> PASS (Tệp PDF tải về chuẩn định dạng và mã băm khớp 100% với signedPdfHash)\n');
+
+  // Test 74: Tamper Detection - Sửa đổi 1 byte trong PDF làm xác minh thất bại
+  console.log('74. Test Tamper Detection (Sửa đổi 1 byte trong vùng được ký làm xác minh thất bại):');
+  const liveStorageService = new StorageService();
+  const signedArtifactDb = await prisma.documentArtifact.findFirstOrThrow({
+    where: {
+      documentId: createdDocWithWf.id,
+      artifactType: 'SIGNED_PDF',
+    },
+  });
+  const originalSignedPdf = await liveStorageService.get(signedArtifactDb.storageKey!);
+  const tamperedSignedPdf = Buffer.from(originalSignedPdf);
+  tamperedSignedPdf[50] = tamperedSignedPdf[50] ^ 0xff; // Đảo bit tại byte thứ 50
+  await liveStorageService.put(signedArtifactDb.storageKey!, tamperedSignedPdf);
+
+  const resVerifyTampered = await fetch(`${API_BASE}/documents/${createdDocWithWf.id}/verify-signature`, {
+    headers: { Authorization: `Bearer ${tokenUserA}` },
+  });
+  const bodyVerifyTampered = await resVerifyTampered.json();
+  const tamperedData = bodyVerifyTampered.data;
+  console.log(`   HTTP Status: ${resVerifyTampered.status} | Valid: ${tamperedData?.isValid} | Tampered: ${tamperedData?.isTampered} | DigestValid: ${tamperedData?.isDigestValid}`);
+  if (
+    resVerifyTampered.status !== 200 ||
+    tamperedData?.isValid !== false ||
+    tamperedData?.isTampered !== true ||
+    tamperedData?.isDigestValid !== false
+  ) {
+    throw new Error(`Test 74 thất bại: Không phát hiện được can thiệp sửa đổi nội dung: ${JSON.stringify(bodyVerifyTampered)}`);
+  }
+  console.log('   -> PASS (Phát hiện can thiệp tức thì: isTampered = true, isDigestValid = false)');
+
+  // Khôi phục lại tệp gốc và kiểm tra lại
+  await liveStorageService.put(signedArtifactDb.storageKey!, originalSignedPdf);
+  const resVerifyRestored = await fetch(`${API_BASE}/documents/${createdDocWithWf.id}/verify-signature`, {
+    headers: { Authorization: `Bearer ${tokenUserA}` },
+  });
+  const bodyVerifyRestored = await resVerifyRestored.json();
+  if (bodyVerifyRestored.data?.isValid !== true) {
+    throw new Error('Test 74 thất bại: Không khôi phục được trạng thái hợp lệ sau khi restore');
+  }
+  console.log('   -> PASS (Khôi phục tệp gốc thành công, xác minh chữ ký hợp lệ trở lại)\n');
+
+  // Test 75: Tenant Isolation - User B (Beta) cố ký hồ sơ của Alpha -> 403 Forbidden
+  console.log('75. Test Tenant Isolation khi Ký (User B thuộc Beta cố ký hồ sơ của Alpha):');
+  const resCrossSign = await fetch(`${API_BASE}/documents/${createdDocWithWf.id}/sign`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenUserB}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      reason: 'Cố tình ký xuyên tổ chức trái phép',
+    }),
+  });
+  console.log(`   HTTP Status: ${resCrossSign.status}`);
+  if (resCrossSign.status !== 403) {
+    throw new Error('Test 75 thất bại: Không chặn 403 khi ký xuyên tổ chức');
+  }
+  console.log('   -> PASS (Chặn tuyệt đối hành vi ký số xuyên tổ chức)\n');
+
+  // Test 76: Tenant Isolation - User B cố xác minh chữ ký hồ sơ của Alpha -> 403 Forbidden
+  console.log('76. Test Tenant Isolation khi Xác minh (User B cố xác minh chữ ký hồ sơ của Alpha):');
+  const resCrossVerify = await fetch(`${API_BASE}/documents/${createdDocWithWf.id}/verify-signature`, {
+    headers: { Authorization: `Bearer ${tokenUserB}` },
+  });
+  console.log(`   HTTP Status: ${resCrossVerify.status}`);
+  if (resCrossVerify.status !== 403) {
+    throw new Error('Test 76 thất bại: Không chặn 403 khi xác minh chữ ký xuyên tổ chức');
+  }
+  console.log('   -> PASS (Chặn tuyệt đối hành vi xác minh chữ ký xuyên tổ chức)\n');
+
+  // Test 77: Tenant Isolation - User B cố tải tệp PDF đã ký của Alpha -> 403 Forbidden
+  console.log('77. Test Tenant Isolation khi Tải PDF đã ký (User B cố tải PDF đã ký của Alpha):');
+  const resCrossDownloadSignedPdf = await fetch(`${API_BASE}/documents/${createdDocWithWf.id}/signed-pdf`, {
+    headers: { Authorization: `Bearer ${tokenUserB}` },
+  });
+  console.log(`   HTTP Status: ${resCrossDownloadSignedPdf.status}`);
+  if (resCrossDownloadSignedPdf.status !== 403) {
+    throw new Error('Test 77 thất bại: Không chặn 403 khi tải PDF đã ký xuyên tổ chức');
+  }
+  console.log('   -> PASS (Chặn tuyệt đối hành vi tải PDF đã ký xuyên tổ chức)\n');
+
+  // Test 78: Chặn ký số khi chứng thư đã bị thu hồi (REVOKED) -> 400 Bad Request
+  console.log('78. Test Chặn ký số hồ sơ khi chứng thư bị thu hồi (REVOKED -> 400):');
+  const resSignWithRevoked = await fetch(`${API_BASE}/documents/${createdDocWithWf.id}/sign`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenUserA}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      certificateId: createdCert.id, // Cert này đã bị thu hồi ở Test 69
+      reason: 'Cố ký bằng chứng thư đã bị thu hồi',
+    }),
+  });
+  const bodySignWithRevoked = await resSignWithRevoked.json();
+  console.log(`   HTTP Status: ${resSignWithRevoked.status} | Error: ${bodySignWithRevoked.error?.message}`);
+  if (resSignWithRevoked.status !== 400) {
+    throw new Error('Test 78 thất bại: Không chặn 400 khi ký bằng chứng thư đã bị thu hồi');
+  }
+  console.log('   -> PASS (Chặn thành công hành vi ký số bằng chứng thư bị thu hồi)\n');
+
+  // Test 79: User Privacy - Đồng nghiệp cùng công ty cố dùng chứng thư của User A để ký -> 403 Forbidden
+  console.log('79. Test User Privacy: Đồng nghiệp cùng tổ chức cố dùng chứng thư cá nhân của User A để ký:');
+  const resColleagueSignDoc = await fetch(`${API_BASE}/documents/${createdDocWithWf.id}/sign`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenAnotherUserA}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      certificateId: activeCertA.id,
+      reason: 'Mạo danh ký số',
+    }),
+  });
+  console.log(`   HTTP Status: ${resColleagueSignDoc.status}`);
+  if (resColleagueSignDoc.status !== 403) {
+    throw new Error('Test 79 thất bại: Không chặn 403 khi đồng nghiệp cố dùng cert cá nhân của người khác để ký số');
+  }
+  console.log('   -> PASS (Bảo vệ chữ ký cá nhân: Chặn người dùng khác ký mạo danh thành công)\n');
+
+  // Test 80: Concurrency & Idempotency - Ký lại hồ sơ cập nhật chữ ký số an toàn
+  console.log('80. Test Idempotency / Cập nhật chữ ký số lặp lại:');
+  const resResignDoc = await fetch(`${API_BASE}/documents/${createdDocWithWf.id}/sign`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenUserA}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      certificateId: activeCertA.id,
+      reason: 'Ký cập nhật lý do mới nhất',
+      location: 'TP. Hồ Chí Minh',
+    }),
+  });
+  const bodyResignDoc = await resResignDoc.json();
+  console.log(`   HTTP Status: ${resResignDoc.status} | ArtifactId: ${bodyResignDoc.data?.artifactId}`);
+  if (resResignDoc.status !== 200 || !bodyResignDoc.data?.signedPdfHash) {
+    throw new Error('Test 80 thất bại: Không cập nhật được chữ ký số lặp lại');
+  }
+
+  // Đếm số lượng SIGNED_PDF artifact trong DB cho document này
+  const totalSignedArtifacts = await prisma.documentArtifact.count({
+    where: {
+      documentId: createdDocWithWf.id,
+      artifactType: 'SIGNED_PDF',
+    },
+  });
+  console.log(`   Total SIGNED_PDF artifacts in DB: ${totalSignedArtifacts}`);
+  if (totalSignedArtifacts !== 1) {
+    throw new Error(`Test 80 thất bại: Có nhiều hơn 1 SIGNED_PDF artifact (${totalSignedArtifacts})`);
+  }
+  console.log('   -> PASS (Xử lý Idempotency hoàn hảo: Cập nhật chữ ký số an toàn, không sinh artifact trùng lặp)\n');
+
   await prisma.$disconnect();
   console.log('========================================================================');
-  console.log('🎉 TẤT CẢ 70/70 KỊCH BẢN KIỂM THỬ LIVE HTTP & SECURITY TRÊN POSTGRESQL');
+  console.log('🎉 TẤT CẢ 80/80 KỊCH BẢN KIỂM THỬ LIVE HTTP & SECURITY TRÊN POSTGRESQL');
   console.log('   (BAO GỒM REASSIGNMENT, SLA SCHEDULER, NOTIFICATION, DELEGATION,');
-  console.log('    PHASE 13.1 PDF ARTIFACT STORAGE VÀ PHASE 13.2.1 CERTIFICATE KEYSTORE)');
+  console.log('    PHASE 13.1 PDF ARTIFACT STORAGE, PHASE 13.2.1 CERTIFICATE KEYSTORE');
+  console.log('    VÀ PHASE 13.2.2 CMS/PDF SIGNING ENGINE)');
   console.log('   ĐÃ PASS 100%!');
   console.log('========================================================================');
 }
-
-
 
 runLiveTests().catch((err) => {
   console.error('\n❌ Lỗi khi chạy live test:', err);

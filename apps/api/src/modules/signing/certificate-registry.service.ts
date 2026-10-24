@@ -8,7 +8,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import * as crypto from 'crypto';
-import { PrismaClient } from '@prisma/client';
+import { PrismaService } from '../../common/prisma/prisma.service.js';
 import {
   AuditAction,
   CertificateStatus,
@@ -35,7 +35,7 @@ export class CertificateRegistryService {
   private readonly logger = new Logger(CertificateRegistryService.name);
 
   constructor(
-    private readonly prisma: PrismaClient,
+    private readonly prisma: PrismaService,
     @Inject(SIGNING_KEY_PROVIDER)
     private readonly signingProvider: ISigningKeyProvider
   ) {}

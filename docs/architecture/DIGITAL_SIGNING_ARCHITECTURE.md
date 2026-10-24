@@ -441,13 +441,57 @@ apps/api/src/modules/signing/
 - Khi triển khai môi trường Production, `ISigningKeyProvider` sẽ được inject bằng `CloudKmsSigningProvider` hoặc `SmartCaSigningProvider`.
 - Ứng dụng chỉ cần thay đổi cấu hình `keyStorageType` trong bảng `DigitalCertificate`, toàn bộ logic ký CMS và xác minh giữ nguyên không thay đổi.
 
+### 9.5. Kiến trúc CMS/PDF Signing Engine (Hoàn thành trong Phase 13.2.2)
+
+Hệ thống đã triển khai đầy đủ các module chuyên trách trong `apps/api/src/modules/signing/engine/`:
+
+```
+apps/api/src/modules/signing/
+├── document-signing.controller.ts            # REST API ký số, xác minh và tải PDF đã ký
+├── engine/
+│   ├── cms-signature.builder.ts              # Xây dựng chữ ký CMS Detached (RFC 5652)
+│   ├── pdf-signature.adapter.ts              # Chèn Signature Dictionary, ByteRange và nhúng CMS
+│   ├── pdf-signature.verifier.ts             # Phân tích ByteRange, so khớp digest và verify RSA
+│   └── pdf-signing.service.ts                # Điều phối quy trình ký an toàn fail-closed
+```
+
+1. **`CmsSignatureBuilder` (RFC 5652 CMS Detached Signature Builder)**:
+   - Dựng cấu trúc ASN.1 DER CMS `ContentInfo` $\rightarrow$ `signedData`.
+   - `encapContentInfo`: Object Identifier `id-data` (`1.2.840.113549.1.7.1`), `eContent` để trống (detached mode chuẩn ISO 32000-1).
+   - Nhúng chuỗi chứng thư số X.509 (`certificates [0] IMPLICIT`).
+   - Sắp xếp từ điển (Lexicographical DER sorting) các thuộc tính ký (`SignedAttributes`): `contentType`, `signingTime`, `messageDigest` (= SHA-256 của byte PDF theo `/ByteRange`).
+   - Gọi `ISigningKeyProvider.signDigest` với 32-byte hash của SignedAttributes DER. Không bao giờ xuất khóa riêng.
+
+2. **`PdfSignatureAdapter` (PDF Structure & ByteRange Allocation)**:
+   - Sử dụng `pdf-lib` để cấp phát Signature Dictionary: `/Type /Sig`, `/Filter /Adobe.PPKLite`, `/SubFilter /adbe.pkcs7.detached`, `/ByteRange`, `/Contents <0000...0000>`.
+   - Tính toán chính xác vị trí offset byte của `/Contents` và `/ByteRange` nhị phân.
+   - Chia tệp thành 2 đoạn: `[0, offset1]` và `[offset2, length2]`, loại trừ chính xác khoảng hex placeholder.
+   - Kiểm tra chống tràn kích thước placeholder (Placeholder Overflow Protection).
+   - Nhúng chuỗi DER hex của CMS vào vùng placeholder mà không làm dịch chuyển cấu trúc byte.
+
+3. **`PdfSignatureVerifier` (Independent Self-Contained Verifier)**:
+   - Phân tích cấu trúc `/ByteRange` từ PDF nhị phân, kiểm tra tính bao phủ (toàn bộ tệp PDF trừ vùng `/Contents`).
+   - Tính toán độc lập `computedDigest` trên đúng 2 đoạn byte trong `/ByteRange`.
+   - Trích xuất cấu trúc CMS từ hex `/Contents`, đọc `messageDigest` từ SignedAttributes và so sánh với `computedDigest`.
+   - Tái tạo chuỗi byte của SignedAttributes (chuyển tag `[0]` thành `SET` 0x31) và dùng khóa công khai X.509 trích xuất từ chữ ký để xác minh chữ ký RSA (`RSASSA-PKCS1-v1_5` với SHA-256).
+   - Phát hiện can thiệp nhị phân cấp byte (Tamper Detection): Chỉ cần sửa 1 bit trong nội dung được ký, `isDigestValid` và `isValid` lập tức trả về `false`.
+
+4. **`PdfSigningService` (Orchestration & Data Flow)**:
+   - Áp dụng PostgreSQL Advisory Locking (`pg_try_advisory_xact_lock`) theo `documentId` để ngăn xung đột tương tranh khi ký đồng thời.
+   - Xác minh tệp đầu vào `OFFICIAL_UNSIGNED` khớp 100% với `rawPdfHash` lưu trong CSDL.
+   - Thẩm định trạng thái chứng thư (`ACTIVE`, còn hạn, thuộc đúng tổ chức và người ký).
+   - Ký số qua Adapter và Verifier; bắt buộc quy trình **Fail-closed**: chỉ khi self-verification đạt 100% mới ghi file vật lý vào Storage và cập nhật bản ghi `DocumentArtifact` kiểu `SIGNED_PDF`.
+   - Ghi nhật ký kiểm toán `DOCUMENT_SIGN_PDF` kèm `signedPdfHash`, `certificateId`, `userId`, `organizationId`.
+
 ---
 
 ## 10. TỔNG KẾT KIẾN TRÚC & RANH GIỚI HIỆN TẠI
 
 - **Đã hoàn thành Phase 13.1**: PDF Rendering Engine (`PdfGeneratorService`) và Secure Local Storage (`StorageService`).
 - **Đã hoàn thành Phase 13.2.1**: Nền tảng quản lý khóa `ISigningKeyProvider`, Keystore cục bộ bảo mật, và Certificate Registry phân quyền đa doanh nghiệp.
-- **Ranh giới chưa triển khai (Dành cho Phase 13.2.2 & 13.3)**:
-  - Chưa triển khai cấu trúc CMS/PKCS#7 nhúng vào PDF (`/ByteRange`, `/Contents`).
+- **Đã hoàn thành Phase 13.2.2**: CMS/PDF Signing Engine thực thụ với CMS Detached, PDF Signature Adapter, ByteRange allocation, Independent Verifier, và Fail-closed orchestration.
+- **Ranh giới chưa triển khai (Dành cho Phase 13.3 & 13.4)**:
   - Chưa triển khai dịch vụ đóng dấu thời gian tin cậy (RFC 3161 TSA).
-  - Chưa tự động ký khi tài liệu chuyển sang `APPROVED`. Tệp PDF hiện tại vẫn là tài liệu thô chưa có chữ ký số mật mã PAdES.
+  - Chưa triển khai PAdES B-LTA (DSS/VRI/LTV).
+  - Chưa tự động ký khi tài liệu chuyển sang `APPROVED` (workflow tự động sẽ được thiết kế ở Phase 13.4).
+

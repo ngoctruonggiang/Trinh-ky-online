@@ -1,33 +1,37 @@
 # MEMORY LOG - DỰ ÁN TRÌNH KÝ ONLINE
 
 ## 1. Trạng thái hiện tại (Current State)
-- **Tình trạng dự án:** Hoàn thành xuất sắc Phase 13.2.1 — Signing Provider, X.509 Certificate Registry & Secure Local Keystore (**ALL GATES PASSED — GO CHO PHASE 13.2.2**).
+- **Tình trạng dự án:** Hoàn thành xuất sắc Phase 13.2.2 — CMS/PDF Signing Engine (**ALL GATES PASSED — GO CHO PHASE 13.3**).
 - **Trạng thái dịch vụ đang chạy phục vụ kiểm thử (Active Servers):**
   - **PostgreSQL Database:** Docker Container `trinh-ky-postgres-dev` (`postgres:16-alpine`) chạy healthy tại `localhost:5432`.
   - **Backend API Server (NestJS):** Đang chạy tại `http://localhost:4000`, SLA Scheduler worker (300s) và Notification Retry Worker (60s) hoạt động nền an toàn.
   - **Frontend Web App (Next.js):** Đang cấu hình kết nối trực tiếp Real API (`NEXT_PUBLIC_USE_MOCK_API=false`), không fallback sang mock.
-- **Tính năng hoàn thành trong Phase 13.2.1:**
-  - `ISigningKeyProvider` & `RemoteSigningProvider`: Interface trừu tượng hóa nhà cung cấp khóa, bảo đảm không bao giờ export private key, phân định rõ ràng ngữ nghĩa `signData` (nhận buffer thô, băm SHA-256) vs `signDigest` (nhận đúng 32-byte hash, bọc ASN.1 DigestInfo + RSA PKCS1 padding).
-  - `DevLocalKeystoreProvider`: Provider phát triển nạp tệp PKCS#12 (.p12), mã hóa AES-256-CBC với passphrase lấy qua cấu hình bí mật (`DEV_SIGNING_PASSPHRASE`), lưu ngoài web root (`apps/api/storage/keystores/dev/`), chặn path traversal bằng regex, tự động kiểm tra cặp khóa tương khớp với X.509.
-  - `DevKeystoreGenerator`: Tiện ích tạo keystore PKCS#12 tự ký cho môi trường Dev/Test (RFC 5280 positive integer serials, UTF-8 attribute encoding), đánh dấu rõ nhãn `DEV TEST ONLY - NOT FOR PRODUCTION`.
-  - `CloudKmsSigningProvider`: Adapter interface chuẩn bị sẵn sàng kết nối AWS KMS, Google Cloud KMS, HSM FIPS 140-2 và VNPT SmartCA.
-  - `CertificateRegistryService` & `CertificateController`: Quản lý danh mục chứng thư số X.509 (`DigitalCertificate`) trên PostgreSQL với migration `20261024020537_add_digital_certificates`, RBAC 3 cấp, Tenant Isolation 100%, bảo vệ quyền riêng tư cá nhân và audit log đầy đủ.
-  - Endpoints: `POST /api/certificates`, `GET /api/certificates`, `GET /api/certificates/:id`, `PATCH /api/certificates/:id/status`, `POST /api/certificates/:id/test-sign`.
-  - Giới hạn nghiêm ngặt: Chưa triển khai CMS/PAdES PDF signing, chưa tích hợp TSA, chưa tự động ký khi văn bản `APPROVED` (dành cho Phase 13.2.2 & 13.3).
+- **Tính năng hoàn thành trong Phase 13.2.2:**
+  - `CmsSignatureBuilder`: Dựng CMS Detached (RFC 5652) với ASN.1 DER `signedData`, `encapContentInfo` `id-data` (omitted `eContent`), sắp xếp từ điển `SignedAttributes` (`contentType`, `signingTime`, `messageDigest`), và ký digest 32-byte thông qua `ISigningKeyProvider.signDigest`. Xác minh thành công 100% bằng OpenSSL CLI với cờ `-binary`.
+  - `PdfSignatureAdapter`: Cấp phát Signature Dictionary (`/Type /Sig`, `/Filter /Adobe.PPKLite`, `/SubFilter /adbe.pkcs7.detached`), vùng đệm `/Contents <hex>` an toàn 8192 bytes, tính toán `/ByteRange` nhị phân chính xác, bảo vệ chống tràn placeholder (Placeholder Overflow Protection).
+  - `PdfSignatureVerifier`: Bộ xác minh độc lập cấu trúc ByteRange, tính lại `computedDigest`, đối soát `messageDigest` và xác minh chữ ký RSA bằng khóa công khai X.509 nhúng. Phát hiện can thiệp nhị phân cấp byte (Tamper Detection) tức thì.
+  - `PdfSigningService`: Điều phối quy trình ký an toàn với PostgreSQL Advisory Lock, kiểm tra tính toàn vẹn của tệp chưa ký (`rawPdfHash`), thẩm định chứng thư số (`ACTIVE`, hạn dùng, quyền sở hữu), ký và tự xác minh fail-closed trước khi lưu storage và cập nhật bản ghi `DocumentArtifact` kiểu `SIGNED_PDF`.
+  - API Endpoints: `POST /api/documents/:id/sign`, `GET /api/documents/:id/verify-signature`, `GET /api/documents/:id/signed-pdf`.
+  - Ranh giới kỹ thuật: Chưa có RFC 3161 TSA, chưa có PAdES B-LTA (DSS/VRI/LTV), chưa tự động ký khi văn bản chuyển sang `APPROVED`.
 
 ## 2. Quyết định kỹ thuật & Kiến trúc (Key Decisions)
-- **Chuẩn hóa Ngữ nghĩa Ký số & Không Export Private Key (ADR-08):**
-  - Mọi thao tác ký được đóng gói bên trong provider. Không trả về private key object hay PEM plaintext.
-  - `signData` và `signDigest` cho ra cùng kết quả chữ ký nhị phân RSASSA-PKCS1-v1_5 SHA-256 khớp 100% với `crypto.verify`.
-- **An toàn Keystore Cục bộ & Giảm thiểu Rủi ro (ADR-03, THR-12):**
-  - Keystore lưu ngoài web root, không commit lên git, không log secret/password.
-  - Trong môi trường Production, bắt buộc dùng `CloudKmsSigningProvider` để khóa nằm trong phần cứng HSM thay vì filesystem.
-- **Phân quyền và Ranh giới Danh mục Chứng thư (ADR-09):**
-  - Chỉ `ADMIN`/`SUPER_ADMIN` mới được đăng ký và thu hồi chứng thư.
-  - `USER` chỉ xem và ký thử nghiệm trên chứng thư cá nhân được gán cho chính mình (`userId === currentUser.id`).
-  - Cấm cập nhật thay đổi `organizationId` hoặc `userId` trên chứng thư đã tạo để chống chiếm quyền sở hữu trái phép.
+- **Chuẩn hóa 3-Tier Hash & Bảo toàn Tệp Gốc (ADR-05, ADR-10):**
+  - `formDataHash`: Hash SHA-256 dữ liệu nghiệp vụ JSON.
+  - `rawPdfHash`: SHA-256 của tệp PDF gốc chưa ký `OFFICIAL_UNSIGNED` (bảo toàn 100%, không bao giờ bị ghi đè).
+  - `signedPdfHash`: SHA-256 của toàn bộ tệp PDF đã ký số `SIGNED_PDF`.
+- **Cấu trúc CMS Detached & Phân bổ ByteRange (ADR-10, THR-13, THR-14):**
+  - Chữ ký CMS Detached không chứa eContent; `messageDigest` ký trên đúng 2 đoạn byte trong `/ByteRange`.
+  - Kiểm tra độ bao phủ 100% của `/ByteRange` để chống PDF Shadow Attacks (THR-13).
+  - Kiểm tra kích thước placeholder trước khi ghi hex đệm để chống tràn bộ đệm (THR-14).
+- **Quy trình Ký Fail-Closed & Tự Xác minh (Self-Verification):**
+  - Chỉ ghi file vào Storage và commit CSDL sau khi `PdfSignatureVerifier.verify` thành công 100%. Nếu có lỗi, hủy ngay lập tức, không lưu tệp hỏng.
+- **Bảo vệ Khóa Riêng & Không Xuất Khóa (ADR-08):**
+  - `ISigningKeyProvider` chỉ nhận `signDigest(keyAlias, digest32Bytes)`, tuyệt đối không bao giờ xuất private key ra ngoài.
 
 ## 3. Nhật ký thay đổi gần nhất (Recent Changes - 5 task gần nhất)
+- `[2026-10-24 - Phase 13.2.2: CMS/PDF Signing Engine]`:
+  - **Files:** `apps/api/prisma/schema.prisma`, `migrations/20261024091838_add_signed_pdf_artifact/*`, `packages/shared/src/*`, `apps/api/src/modules/signing/*`, `apps/api/src/modules/artifact/artifact.service.ts`, `apps/api/test/*`, `docs/API_CONTRACT.md`, `docs/architecture/*`, `docs/security/*`.
+  - **Kết quả:** 199/199 API Unit tests PASS; 126/126 PostgreSQL integration tests PASS; 80/80 Live HTTP E2E tests PASS (100%); Shared (47/47) & Web (46/46) PASS; OpenSSL 3.5.7 CLI CMS verification PASS; Monorepo build PASS. Sẵn sàng Phase 13.3.
 - `[2026-10-24 - Phase 13.2.1: Signing Provider, X.509 Certificate Registry & Secure Local Keystore]`:
   - **Files:** `apps/api/prisma/schema.prisma`, `migrations/20261024020537_add_digital_certificates/*`, `packages/shared/src/*`, `apps/api/src/modules/signing/*`, `apps/api/test/*`, `docs/API_CONTRACT.md`, `docs/architecture/*`, `docs/security/*`.
   - **Kết quả:** 180/180 API Unit tests PASS; 119/119 PostgreSQL integration tests PASS; 70/70 Live HTTP E2E tests PASS (100%); Shared (47/47) & Web (46/46) PASS; Monorepo build PASS. Sẵn sàng Phase 13.2.2.
@@ -40,6 +44,3 @@
 - `[2026-10-24 - Phase 12.1.1: Delegation Security, Concurrency & Policy Correctness Audit]`:
   - **Files:** `apps/api/src/modules/delegation/*`, `apps/api/src/modules/workflow/*`, `apps/api/test/*`, `docs/API_CONTRACT.md`.
   - **Kết quả:** 235/235 Unit tests PASS; 107/107 PostgreSQL integration tests PASS; 52/52 Live HTTP E2E tests PASS; Monorepo build PASS 100%.
-- `[2026-10-23 - Phase 12.1: Delegation Policy Engine & Auditable Workflow Integration]`:
-  - **Files:** `packages/shared/*`, `apps/api/prisma/schema.prisma`, `apps/api/src/modules/delegation/*`, `apps/api/src/modules/workflow/*`, `apps/web/*`, `apps/api/test/*`, `docs/API_CONTRACT.md`.
-  - **Kết quả:** 230/230 Unit tests PASS; 97/97 PostgreSQL integration tests PASS; 48/48 Live HTTP E2E tests PASS; Monorepo build PASS 100%.

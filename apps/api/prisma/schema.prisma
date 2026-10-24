@@ -616,6 +616,7 @@ model DelegationPolicy {
 enum ArtifactType {
   PREVIEW           // PDF xem trước / bản nháp
   OFFICIAL_UNSIGNED // PDF chính thức chưa ký
+  SIGNED_PDF        // PDF đã được ký số mật mã PAdES CMS
 }
 
 enum ArtifactStatus {
@@ -637,7 +638,12 @@ model DocumentArtifact {
   sizeBytes         Int?           // Dung lượng byte của file PDF thực tế
   rawPdfHash        String?        // SHA-256 của chính xác các byte PDF được lưu
   formDataHash      String         // SHA-256 canonical của formData tại documentVersion đó
-  signedPdfHash     String?        // NULL trong Phase 13.1, dành riêng cho Phase 13.2+ khi ký số thực sự
+  signedPdfHash     String?        // SHA-256 của tệp PDF đã ký số
+  certificateId     String?        // ID chứng thư số dùng để ký
+  signerName        String?        // Tên người ký
+  signerSubject     String?        // Subject DN trích xuất từ chứng thư
+  signingTime       DateTime?      // Thời điểm ký số
+  byteRange         Int[]          // Mảng [offset1, len1, offset2, len2] của cấu trúc PDF
   requestedById     String
   errorMessage      String?
   startedAt         DateTime?
@@ -645,15 +651,18 @@ model DocumentArtifact {
   createdAt         DateTime       @default(now())
   updatedAt         DateTime       @updatedAt
 
-  document          Document        @relation(fields: [documentId], references: [id], onDelete: Cascade)
-  documentVersion   DocumentVersion @relation(fields: [documentVersionId], references: [id], onDelete: Cascade)
-  organization      Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  requestedBy       User            @relation("ArtifactRequester", fields: [requestedById], references: [id])
+  document          Document            @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  documentVersion   DocumentVersion     @relation(fields: [documentVersionId], references: [id], onDelete: Cascade)
+  organization      Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  requestedBy       User                @relation("ArtifactRequester", fields: [requestedById], references: [id])
+  certificate       DigitalCertificate? @relation(fields: [certificateId], references: [id], onDelete: SetNull)
 
   @@unique([documentVersionId, artifactType])
   @@index([documentId, status])
   @@index([organizationId])
   @@index([rawPdfHash])
+  @@index([signedPdfHash])
+  @@index([certificateId])
   @@map("document_artifacts")
 }
 
@@ -694,6 +703,7 @@ model DigitalCertificate {
 
   organization      Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   user              User?             @relation(fields: [userId], references: [id], onDelete: SetNull)
+  artifacts         DocumentArtifact[]
 
   @@unique([organizationId, fingerprintSha256])
   @@unique([organizationId, keyAlias])

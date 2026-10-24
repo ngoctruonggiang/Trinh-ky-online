@@ -1515,3 +1515,109 @@ Phần này quy định các giao ước API phục vụ việc kết xuất PDF
     }
   }
   ```
+
+---
+
+### 10.10. Ký số PDF mật mã bằng CMS Detached (Phase 13.2.2 — Sign Document PDF)
+- **Endpoint:** `POST /api/documents/:id/sign`
+- **Mục đích:** Thực hiện quy trình ký số PDF mật mã chuẩn ISO 32000-1 / RFC 5652:
+  1. Kiểm tra tài liệu và phân quyền Tenant (chặn 403 Forbidden nếu khác Tenant).
+  2. Nạp bản ghi PDF chưa ký `OFFICIAL_UNSIGNED` từ hệ thống lưu trữ an toàn ngoài web root.
+  3. Lấy chứng thư số hợp lệ của người ký (`ACTIVE`, còn hạn, người dùng có quyền sử dụng).
+  4. Tạo cấu trúc PDF Signature Dictionary (`/Type /Sig`, `/Filter /Adobe.PPKLite`, `/SubFilter /adbe.pkcs7.detached`).
+  5. Thiết lập `/ByteRange [offset1, len1, offset2, len2]` và vùng đệm nhị phân CMS DER (`/Contents <hex>`).
+  6. Trích xuất chính xác 2 đoạn byte trong `/ByteRange` và băm SHA-256 (32 bytes).
+  7. Dựng CMS Detached DER với `SignerInfo`, `contentType`, `signingTime`, `messageDigest` = SHA-256 của ByteRange, gọi `ISigningKeyProvider.signDigest`.
+  8. Nhúng CMS hex vào vị trí `/Contents`, xác minh lại độc lập tính toàn vẹn và chữ ký RSA trước khi lưu trữ (Fail-closed verification).
+  9. Lưu trữ tệp PDF đã ký vào Storage Service và tạo bản ghi `DocumentArtifact` kiểu `SIGNED_PDF` với `signedPdfHash`.
+  10. **Bảo toàn tệp gốc:** Bản ghi và tệp nhị phân `OFFICIAL_UNSIGNED` không bao giờ bị ghi đè.
+- **Quyền hạn:** `USER` (thuộc cùng tổ chức sở hữu tài liệu), `ADMIN`, `SUPER_ADMIN`.
+- **Request Body:**
+  ```json
+  {
+    "certificateId": "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d",
+    "versionNumber": 1,
+    "reason": "Phê duyệt quyết toán hợp đồng công nghệ 2026",
+    "location": "Hà Nội, Việt Nam",
+    "contactInfo": "nguyenvana@vinagroup.vn"
+  }
+  ```
+- **Response Thành công (HTTP 200 OK):**
+  ```json
+  {
+    "success": true,
+    "data": {
+      "artifactId": "uuid-signed-artifact-id",
+      "documentId": "uuid-document-id",
+      "documentVersionId": "uuid-doc-version-id",
+      "status": "COMPLETED",
+      "signedPdfHash": "853ea2f977426aef...",
+      "rawPdfHash": "726326844122a24b...",
+      "formDataHash": "add0c77b03ccefe9...",
+      "sizeBytes": 1182093,
+      "byteRange": [0, 1164653, 1181039, 1052],
+      "signerSubject": "CN=Nguyễn Văn A, O=Tập đoàn VinaGroup, C=VN",
+      "signerIssuer": "CN=VinaGroup Internal Root CA, O=VinaGroup",
+      "signingTime": "2026-10-24T09:34:12.000Z",
+      "isSignatureVerified": true,
+      "downloadUrl": "/api/documents/uuid-document-id/pdf?type=SIGNED_PDF"
+    },
+    "timestamp": "2026-10-24T09:34:12.100Z"
+  }
+  ```
+
+---
+
+### 10.11. Xác minh độc lập chữ ký số PDF (Phase 13.2.2 — Verify PDF Signature)
+- **Endpoint:** `GET /api/documents/:id/verify-signature`
+- **Query Parameters:** `version` (tùy chọn, mặc định là phiên bản hiện tại).
+- **Mục đích:** Đọc tệp PDF đã ký từ kho lưu trữ, phân tích cấu trúc `/ByteRange`, trích xuất CMS Signature DER, kiểm tra toàn vẹn mã băm `messageDigest` so với nội dung byte vật lý và xác minh chữ ký RSA của `SignerInfo` với khóa công khai X.509 nhúng trong chứng thư.
+- **Quyền hạn:** `USER` (cùng tổ chức), `ADMIN`, `SUPER_ADMIN`. Chặn 403 Forbidden nếu khác Tenant.
+- **Response Thành công (HTTP 200 OK):**
+  ```json
+  {
+    "success": true,
+    "data": {
+      "isValid": true,
+      "isDigestValid": true,
+      "isSignatureValid": true,
+      "isTampered": false,
+      "signerSubject": "CN=Nguyễn Văn A, O=Tập đoàn VinaGroup, C=VN",
+      "signerIssuer": "CN=VinaGroup Internal Root CA, O=VinaGroup",
+      "serialNumber": "5f3a89bc1200e4",
+      "signingTime": "2026-10-24T09:34:12.000Z",
+      "byteRange": [0, 1164653, 1181039, 1052],
+      "messageDigestHex": "a1b2c3d4...",
+      "computedDigestHex": "a1b2c3d4..."
+    },
+    "timestamp": "2026-10-24T09:34:15.000Z"
+  }
+  ```
+- **Response khi tệp bị can thiệp / Tampered:**
+  ```json
+  {
+    "success": true,
+    "data": {
+      "isValid": false,
+      "isDigestValid": false,
+      "isSignatureValid": false,
+      "isTampered": true,
+      "errorMessage": "Mã băm SHA-256 của vùng dữ liệu ký không khớp với messageDigest trong CMS."
+    }
+  }
+  ```
+
+---
+
+### 10.12. Tải tệp PDF đã ký số (Phase 13.2.2 — Download Signed PDF)
+- **Endpoint:** `GET /api/documents/:id/signed-pdf`
+- **Query Parameters:** `version` (tùy chọn, mặc định là phiên bản hiện tại).
+- **Quyền hạn:** Kiểm soát phân quyền Tenant chặt chẽ (chặn 403 Forbidden đối với người dùng tổ chức khác).
+- **Headers trả về:**
+  - `Content-Type`: `application/pdf`
+  - `Content-Disposition`: `inline; filename="{docNumber}_v{version}_signed.pdf"`
+  - `X-Raw-Pdf-Hash`: SHA-256 của PDF gốc chưa ký
+  - `X-Signed-Pdf-Hash`: SHA-256 của toàn bộ tệp PDF đã ký
+  - `X-Artifact-Id`: UUID của artifact
+- **Response (HTTP 200 OK):** Luồng nhị phân Buffer của tệp PDF đã ký số hoàn chỉnh.
+

@@ -215,12 +215,43 @@ Nếu không có bảng quản lý chứng thư tập trung, hệ thống khó t
 
 ---
 
+---
+
+## ADR-10: CẤU TRÚC CMS DETACHED VÀ PHÂN BỔ /BYTERANGE CHO CHỮ KÝ SỐ PDF (PHASE 13.2.2)
+
+### Bối cảnh & Vấn đề
+Để nhúng chữ ký số vào tệp PDF theo tiêu chuẩn ISO 32000-1 và RFC 5652 mà không làm sai lệch mã băm của chính tệp PDF:
+1. Chữ ký mật mã không thể ký trên toàn bộ tệp PDF (vì tệp PDF phải chứa chính chuỗi chữ ký đó $\rightarrow$ nghịch lý tự tham chiếu).
+2. Chuẩn PDF giải quyết nghịch lý này bằng mảng `/ByteRange [offset1, len1, offset2, len2]` loại trừ chính xác vùng chứa chữ ký `/Contents <hex>`.
+3. Chữ ký CMS phải ở chế độ Detached (tức là không chứa nội dung byte PDF bên trong `eContent`), nhưng trong thuộc tính ký `SignedAttributes` bắt buộc phải có `messageDigest` bằng đúng giá trị SHA-256 của các byte trong `/ByteRange`.
+4. Nếu kích thước chuỗi DER của CMS vượt quá dung lượng byte đệm đã cấp phát trong `/Contents`, việc ghi đè sẽ làm dịch chuyển vị trí các object phía sau và làm hỏng toàn bộ cấu trúc xref của PDF.
+
+### Quyết định
+1. **Dựng CMS Detached bằng `node-forge` ASN.1 DER**:
+   - `ContentInfo` type `signedData`, `encapContentInfo` type `id-data` với `eContent` omitted (detached mode).
+   - Thuộc tính ký (`SignedAttributes`) chứa `contentType` (`id-data`), `signingTime` (UTC Time), và `messageDigest` (32 bytes SHA-256 của ByteRange).
+   - Sắp xếp từ điển (Lexicographical order) các thuộc tính ký theo quy tắc DER trước khi mã hóa thành ASN.1 SET (0x31).
+   - Chuyển 32-byte digest của SignedAttributes cho `ISigningKeyProvider.signDigest`. Private key không bao giờ rời khỏi provider.
+2. **Cấp phát ByteRange & Vùng đệm chữ ký với `pdf-lib`**:
+   - Signature Dictionary được bổ sung vào PDF: `/Type /Sig`, `/Filter /Adobe.PPKLite`, `/SubFilter /adbe.pkcs7.detached`.
+   - Cấp phát vùng đệm `/Contents` dạng hex với kích thước an toàn 8192 bytes (16384 ký tự hex).
+   - Quét vị trí byte nhị phân của `/Contents <` và `>` để xác định chính xác `offset1`, `len1`, `offset2`, `len2`.
+   - **Chống tràn vùng đệm (Placeholder Overflow Protection)**: Kiểm tra nghiêm ngặt `cmsDer.length <= placeholderByteLength`. Nếu CMS vượt quá dung lượng, hệ thống lập tức ném ngoại lệ fail-safe thay vì ghi đè làm hỏng PDF.
+3. **Quy trình Xác minh Fail-Closed (Self-Verification)**:
+   - Trước khi lưu tệp PDF đã ký vào Storage và trước khi commit transaction CSDL, `PdfSigningService` bắt buộc gọi `PdfSignatureVerifier.verify(signedPdfBuffer)`.
+   - Verifier tính lại `computedDigest` trên đúng 2 đoạn byte trong `/ByteRange`, trích xuất `messageDigest` từ CMS, và đối soát chữ ký RSA bằng khóa công khai X.509 trích xuất từ chính CMS.
+   - Nếu bất kỳ bước kiểm tra nào thất bại, tệp bị hủy ngay lập tức và ném lỗi nghiệp vụ. Không bao giờ lưu tệp ký hỏng vào hệ thống.
+4. **Đối soát độc lập với OpenSSL**:
+   - Chữ ký CMS Detached được kiểm chứng độc lập bằng lệnh `openssl cms -verify -inform DER -in sig.der -content content.bin -CAfile cert.pem -binary` đạt kết quả `CMS Verification successful` 100%.
+
+---
+
 ## BẢNG TỔNG HỢP CÁC QUYẾT ĐỊNH
 
 | Mã ADR | Chủ đề | Lựa chọn chính | Trạng thái |
 | :--- | :--- | :--- | :--- |
 | **ADR-01** | Định dạng chữ ký | PAdES ISO 32000 CMS Detached Signature | **APPROVED** |
-| **ADR-02** | Thư viện mật mã | `pdf-lib` + `@node-signpdf/signpdf` + `@peculiar/x509` + Native Node.js `crypto` | **APPROVED** |
+| **ADR-02** | Thư viện mật mã | `pdf-lib` + `node-forge` ASN.1 DER + Native Node.js `crypto` + `ISigningKeyProvider` | **APPROVED** |
 | **ADR-03** | Quản lý khóa | `ISigningKeyProvider` (Dev Keystore $\rightarrow$ Cloud KMS $\rightarrow$ Remote SmartCA) | **APPROVED** |
 | **ADR-04** | Điểm kích hoạt ký | Final Archival Sealing (Default) & Per-Step Incremental Signing (Configurable) | **APPROVED** |
 | **ADR-05** | Lưu trữ & Toàn vẹn | Chuỗi 3-Tier Hash (`formData` $\rightarrow$ `rawPdf` $\rightarrow$ `signedPdf`) | **APPROVED** |
@@ -228,3 +259,4 @@ Nếu không có bảng quản lý chứng thư tập trung, hệ thống khó t
 | **ADR-07** | Chống ký lặp | Advisory Locks + OCC + Idempotency Keys | **APPROVED** |
 | **ADR-08** | Ngữ nghĩa Ký số | Không export Private Key, chuẩn hóa `signData` vs `signDigest` | **APPROVED** |
 | **ADR-09** | Danh mục Chứng thư | Phân quyền Tenant/User, bất biến quyền sở hữu, kiểm soát thu hồi | **APPROVED** |
+| **ADR-10** | CMS/ByteRange Engine| CMS Detached, cấp phát ByteRange, chống tràn placeholder, Fail-closed self-verify | **APPROVED** |
