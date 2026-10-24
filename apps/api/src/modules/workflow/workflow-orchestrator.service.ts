@@ -398,6 +398,28 @@ export class WorkflowOrchestratorService {
             delegatedFromUserId = delegationResolution.policy.delegatorId;
             delegationPolicyId = delegationResolution.policy.id;
             delegatorName = delegationResolution.delegatorName;
+
+            // Kiểm soát tương tranh Revoke/Approve: Khóa bi quan hàng policy (FOR UPDATE)
+            // Nếu revoke thắng trước theo tuần tự hóa, policy.isActive = false -> Từ chối phê duyệt.
+            if (typeof (tx as any).$queryRaw === 'function') {
+              const lockedPolicies: any[] = await (tx as any).$queryRaw`
+                SELECT id, "isActive", "startDate", "endDate"
+                FROM delegation_policies
+                WHERE id = ${delegationPolicyId}
+                FOR UPDATE
+              `;
+              const lockedPolicy = lockedPolicies[0];
+              if (
+                !lockedPolicy ||
+                !lockedPolicy.isActive ||
+                new Date(lockedPolicy.startDate) > now ||
+                new Date(lockedPolicy.endDate) < now
+              ) {
+                throw new ForbiddenException(
+                  'Chính sách ủy quyền đã bị thu hồi hoặc hết thời hạn hiệu lực trong quá trình xử lý.'
+                );
+              }
+            }
           }
         }
 

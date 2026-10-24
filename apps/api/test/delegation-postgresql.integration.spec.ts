@@ -303,7 +303,7 @@ describe('Phase 12.1: Delegation Policy Engine & Auditable Workflow Integration 
     });
   });
 
-  describe('2. Thuật toán phát hiện chu trình ủy quyền (Cycle & Loop Detection on PostgreSQL)', () => {
+  describe('2. Thuật toán phát hiện chu trình ủy quyền & Kiểm soát tương tranh (Temporal Cycle & Concurrency on PostgreSQL)', () => {
     let p1Id: string;
     let p2Id: string;
 
@@ -358,10 +358,193 @@ describe('Phase 12.1: Delegation Policy Engine & Auditable Workflow Integration 
       ).rejects.toThrow('chu trình ủy quyền khép kín');
     });
 
-    // Dọn dẹp các policy vừa tạo để các test sau độc lập
-    afterAll(async () => {
-      if (p1Id) await prisma.delegationPolicy.delete({ where: { id: p1Id } });
-      if (p2Id) await prisma.delegationPolicy.delete({ where: { id: p2Id } });
+    it('2.4. Kiểm soát tương tranh: Hai request đồng thời tạo cạnh ngược chiều (A->B và B->A)', async () => {
+      // Dọn dẹp p1, p2 trước để test concurrency thuần túy giữa B và C
+      await prisma.delegationPolicy.deleteMany({
+        where: { id: { in: [p1Id, p2Id] } },
+      });
+
+      const now = Date.now();
+      // Bắn đồng thời 2 transaction tạo B -> C và C -> B
+      const [resBC, resCB] = await Promise.allSettled([
+        delegationService.createPolicy(deputyB.id, 'USER', orgAlphaId, {
+          delegateeId: assistantC.id,
+          startDate: new Date(now).toISOString(),
+          endDate: new Date(now + 5 * 86400000).toISOString(),
+          reason: 'Concurrent create B -> C',
+        }),
+        delegationService.createPolicy(assistantC.id, 'USER', orgAlphaId, {
+          delegateeId: deputyB.id,
+          startDate: new Date(now).toISOString(),
+          endDate: new Date(now + 5 * 86400000).toISOString(),
+          reason: 'Concurrent create C -> B',
+        }),
+      ]);
+
+      // Phải có đúng 1 request thành công và 1 request thất bại vì chu trình ủy quyền
+      const fulfilled = [resBC, resCB].filter((r) => r.status === 'fulfilled');
+      const rejected = [resBC, resCB].filter((r) => r.status === 'rejected');
+
+      expect(fulfilled.length).toBe(1);
+      expect(rejected.length).toBe(1);
+      const rejectedReason = (rejected[0] as PromiseRejectedResult).reason;
+      expect(rejectedReason.message).toContain('chu trình ủy quyền khép kín');
+
+      // Xác minh DB chỉ lưu duy nhất 1 cạnh, hoàn toàn không bị race condition
+      const activeEdges = await prisma.delegationPolicy.findMany({
+        where: {
+          organizationId: orgAlphaId,
+          isActive: true,
+          OR: [
+            { delegatorId: deputyB.id, delegateeId: assistantC.id },
+            { delegatorId: assistantC.id, delegateeId: deputyB.id },
+          ],
+        },
+      });
+      expect(activeEdges.length).toBe(1);
+
+      // Dọn dẹp cạnh vừa tạo
+      await prisma.delegationPolicy.deleteMany({
+        where: { id: activeEdges[0].id },
+      });
+    });
+
+    it('2.5. Temporal Cycle: Đường đi khép kín nhưng không có thời điểm chung (Disjoint windows) ĐƯỢC PHÉP tạo', async () => {
+      // Scenario mẫu:
+      // A -> B: ngày 1 -> ngày 10
+      // B -> C: ngày 20 -> ngày 30
+      // C -> A: ngày 12 -> ngày 18
+      const base = Date.now() + 10 * 86400000;
+      const t_A_B_start = new Date(base + 1 * 86400000);
+      const t_A_B_end = new Date(base + 10 * 86400000);
+
+      const t_B_C_start = new Date(base + 20 * 86400000);
+      const t_B_C_end = new Date(base + 30 * 86400000);
+
+      const t_C_A_start = new Date(base + 12 * 86400000);
+      const t_C_A_end = new Date(base + 18 * 86400000);
+
+      // Cạnh 1: A -> B
+      const pol1 = await delegationService.createPolicy(directorA.id, 'USER', orgAlphaId, {
+        delegateeId: deputyB.id,
+        startDate: t_A_B_start.toISOString(),
+        endDate: t_A_B_end.toISOString(),
+        reason: 'A sang B giai đoạn 1',
+      });
+
+      // Cạnh 2: B -> C
+      const pol2 = await delegationService.createPolicy(deputyB.id, 'USER', orgAlphaId, {
+        delegateeId: assistantC.id,
+        startDate: t_B_C_start.toISOString(),
+        endDate: t_B_C_end.toISOString(),
+        reason: 'B sang C giai đoạn 2',
+      });
+
+      // Cạnh 3: C -> A (không có thời điểm nào giao nhau chung giữa 3 cạnh)
+      const pol3 = await delegationService.createPolicy(assistantC.id, 'USER', orgAlphaId, {
+        delegateeId: directorA.id,
+        startDate: t_C_A_start.toISOString(),
+        endDate: t_C_A_end.toISOString(),
+        reason: 'C sang A giai đoạn giữa',
+      });
+
+      expect(pol1.id).toBeDefined();
+      expect(pol2.id).toBeDefined();
+      expect(pol3.id).toBeDefined();
+
+      // Dọn dẹp cả 3
+      await prisma.delegationPolicy.deleteMany({
+        where: { id: { in: [pol1.id, pol2.id, pol3.id] } },
+      });
+    });
+
+    it('2.6. Temporal Cycle: Chặn khi có khoảng thời gian giao nhau thực sự', async () => {
+      // A -> B: ngày 1 -> ngày 20
+      // B -> C: ngày 10 -> ngày 30
+      // C -> A: ngày 15 -> ngày 25
+      // Giao nhau tại ngày 15 -> 20 -> Chu trình thực sự!
+      const base = Date.now() + 50 * 86400000;
+      const pol1 = await delegationService.createPolicy(directorA.id, 'USER', orgAlphaId, {
+        delegateeId: deputyB.id,
+        startDate: new Date(base + 1 * 86400000).toISOString(),
+        endDate: new Date(base + 20 * 86400000).toISOString(),
+        reason: 'A sang B có giao thoa',
+      });
+
+      const pol2 = await delegationService.createPolicy(deputyB.id, 'USER', orgAlphaId, {
+        delegateeId: assistantC.id,
+        startDate: new Date(base + 10 * 86400000).toISOString(),
+        endDate: new Date(base + 30 * 86400000).toISOString(),
+        reason: 'B sang C có giao thoa',
+      });
+
+      await expect(
+        delegationService.createPolicy(assistantC.id, 'USER', orgAlphaId, {
+          delegateeId: directorA.id,
+          startDate: new Date(base + 15 * 86400000).toISOString(),
+          endDate: new Date(base + 25 * 86400000).toISOString(),
+          reason: 'C sang A trùng thời điểm',
+        })
+      ).rejects.toThrow('chu trình ủy quyền khép kín');
+
+      await prisma.delegationPolicy.deleteMany({
+        where: { id: { in: [pol1.id, pol2.id] } },
+      });
+    });
+
+    it('2.7. Cập nhật policy (updatePolicy) kéo dài endDate tạo chu trình sẽ bị chặn', async () => {
+      const base = Date.now() + 100 * 86400000;
+      // A -> B: ngày 1 -> ngày 20
+      const pol1 = await delegationService.createPolicy(directorA.id, 'USER', orgAlphaId, {
+        delegateeId: deputyB.id,
+        startDate: new Date(base + 1 * 86400000).toISOString(),
+        endDate: new Date(base + 20 * 86400000).toISOString(),
+      });
+
+      // B -> A ban đầu ở ngày 25 -> ngày 30 (không giao thoa)
+      const pol2 = await delegationService.createPolicy(deputyB.id, 'USER', orgAlphaId, {
+        delegateeId: directorA.id,
+        startDate: new Date(base + 25 * 86400000).toISOString(),
+        endDate: new Date(base + 30 * 86400000).toISOString(),
+      });
+
+      // Bây giờ cố tình update pol1 kéo dài endDate từ ngày 20 sang ngày 28 (giao thoa với pol2 ngày 25-28)
+      await expect(
+        delegationService.updatePolicy(pol1.id, directorA.id, 'USER', orgAlphaId, {
+          endDate: new Date(base + 28 * 86400000).toISOString(),
+        })
+      ).rejects.toThrow('chu trình ủy quyền khép kín');
+
+      await prisma.delegationPolicy.deleteMany({
+        where: { id: { in: [pol1.id, pol2.id] } },
+      });
+    });
+
+    it('2.8. Policy đã bị thu hồi (isActive = false) không cản trở ủy quyền ngược chiều', async () => {
+      const now = Date.now();
+      // Tạo A -> B
+      const pol1 = await delegationService.createPolicy(directorA.id, 'USER', orgAlphaId, {
+        delegateeId: deputyB.id,
+        startDate: new Date(now).toISOString(),
+        endDate: new Date(now + 86400000).toISOString(),
+      });
+
+      // Thu hồi pol1
+      await delegationService.revokePolicy(pol1.id, directorA.id, 'USER', orgAlphaId, 'Hủy ủy quyền');
+
+      // Giờ B -> A trong cùng khoảng thời gian -> Phải THÀNH CÔNG vì pol1 đã inactive
+      const pol2 = await delegationService.createPolicy(deputyB.id, 'USER', orgAlphaId, {
+        delegateeId: directorA.id,
+        startDate: new Date(now).toISOString(),
+        endDate: new Date(now + 86400000).toISOString(),
+      });
+
+      expect(pol2.id).toBeDefined();
+      expect(pol2.isActive).toBe(true);
+
+      await prisma.delegationPolicy.deleteMany({
+        where: { id: { in: [pol1.id, pol2.id] } },
+      });
     });
   });
 
@@ -555,6 +738,171 @@ describe('Phase 12.1: Delegation Policy Engine & Auditable Workflow Integration 
       const detail2 = await readService.getDocumentDetail(doc2.id, userPrincipalB);
       expect(detail2.permissions.canApprove).toBe(false);
       expect(detail2.permissions.isDelegatedApproval).toBe(false);
+    });
+
+    it('3.5. Race condition thực tế: Thu hồi policy (revokePolicy) đồng thời với ủy quyền phê duyệt (processAssigneeDecision)', async () => {
+      // 1. Tạo hồ sơ mới gán cho Director A
+      const docRace = await orchestrator.createDocument({
+        templateId: testTemplateId,
+        title: 'Hồ sơ kiểm thử race condition revoke/approve',
+        formData: { amount: 25000000 },
+        userId: userCreator.id,
+        userOrganizationId: orgAlphaId,
+        userDepartmentId: deptFinanceId,
+      });
+
+      const workflowRace = await prisma.approvalWorkflow.findUnique({
+        where: { documentId: docRace.id },
+        include: { steps: true },
+      });
+      const stepRace = workflowRace!.steps[0];
+      await prisma.stepAssignee.create({
+        data: {
+          stepId: stepRace.id,
+          userId: directorA.id,
+          role: AssigneeRole.APPROVER,
+          decision: AssigneeDecision.PENDING,
+        },
+      });
+
+      await orchestrator.submitDocument({
+        documentId: docRace.id,
+        userId: userCreator.id,
+      });
+
+      // 2. Tạo policy ủy quyền Director A -> Deputy B
+      const now = Date.now();
+      const pRace = await delegationService.createPolicy(directorA.id, 'USER', orgAlphaId, {
+        delegateeId: deputyB.id,
+        startDate: new Date(now - 10000).toISOString(),
+        endDate: new Date(now + 86400000).toISOString(),
+        scopeTemplateId: testTemplateId,
+        reason: 'Ủy quyền cho test race revoke/approve',
+      });
+
+      // 3. Bắn đồng thời revokePolicy và processAssigneeDecision
+      const [revokeRes, approveRes] = await Promise.allSettled([
+        delegationService.revokePolicy(pRace.id, directorA.id, 'USER', orgAlphaId, 'Thu hồi đồng thời'),
+        orchestrator.processAssigneeDecision({
+          documentId: docRace.id,
+          userId: deputyB.id,
+          decision: AssigneeDecision.APPROVED,
+          decisionComment: 'Phê duyệt đồng thời lúc thu hồi',
+        }),
+      ]);
+
+      // Thứ tự tuần tự hóa đã xác định bởi khóa FOR UPDATE trên delegation_policies:
+      // Trường hợp 1: Nếu revoke thắng trước:
+      // - revokeRes fulfilled (isActive: false)
+      // - approveRes rejected với ForbiddenException ('Chính sách ủy quyền đã bị thu hồi hoặc hết thời hạn hiệu lực trong quá trình xử lý.')
+      // Trường hợp 2: Nếu approve thắng trước:
+      // - approveRes fulfilled (step APPROVED)
+      // - revokeRes fulfilled (sau khi approve cam kết xong, revoke khóa row và đánh dấu isActive: false)
+      if (revokeRes.status === 'fulfilled' && approveRes.status === 'rejected') {
+        const err = (approveRes as PromiseRejectedResult).reason;
+        expect(err).toBeInstanceOf(ForbiddenException);
+        expect(
+          err.message.includes('bị thu hồi') ||
+          err.message.includes('không có ủy quyền hợp lệ')
+        ).toBe(true);
+      } else if (approveRes.status === 'fulfilled' && revokeRes.status === 'fulfilled') {
+        const history = await prisma.stepDecisionHistory.findFirst({
+          where: { stepId: stepRace.id },
+        });
+        expect(history?.isDelegated).toBe(true);
+        expect(history?.delegatedFromUserId).toBe(directorA.id);
+      } else {
+        throw new Error(`Trạng thái không mong muốn trong race condition: revoke=${revokeRes.status}, approve=${approveRes.status}`);
+      }
+
+      // Cuối cùng policy PHẢI luôn ở trạng thái inactive
+      const finalPolicy = await prisma.delegationPolicy.findUnique({
+        where: { id: pRace.id },
+      });
+      expect(finalPolicy?.isActive).toBe(false);
+    });
+  });
+
+  describe('4. Phân quyền danh sách policy & Tenant Isolation (getPolicies on PostgreSQL)', () => {
+    let polAlphaId: string;
+    let polBetaId: string;
+
+    beforeAll(async () => {
+      const now = Date.now();
+      // Policy 1 trong Alpha: Director A -> Deputy B
+      const pAlpha = await delegationService.createPolicy(directorA.id, 'USER', orgAlphaId, {
+        delegateeId: deputyB.id,
+        startDate: new Date(now - 1000).toISOString(),
+        endDate: new Date(now + 86400000).toISOString(),
+        reason: 'Policy nội bộ Alpha',
+      });
+      polAlphaId = pAlpha.id;
+
+      // Policy 2 trong Beta: Director Beta -> User khác trong Beta
+      const userBeta2 = await prisma.user.create({
+        data: {
+          email: `subordinate.beta.${now}@beta.com`,
+          fullName: 'Nhân viên Beta 2',
+          passwordHash: 'dummy',
+          role: UserRole.USER,
+          organizationId: orgBetaId,
+          isActive: true,
+        },
+      });
+
+      const pBeta = await delegationService.createPolicy(directorBeta.id, 'USER', orgBetaId, {
+        delegateeId: userBeta2.id,
+        startDate: new Date(now - 1000).toISOString(),
+        endDate: new Date(now + 86400000).toISOString(),
+        reason: 'Policy nội bộ Beta',
+      });
+      polBetaId = pBeta.id;
+    });
+
+    afterAll(async () => {
+      await prisma.delegationPolicy.deleteMany({
+        where: { id: { in: [polAlphaId, polBetaId] } },
+      });
+    });
+
+    it('4.1. USER query role=all chỉ thấy policy của chính mình, không thấy của đồng nghiệp khác', async () => {
+      const resC = await delegationService.getPolicies(assistantC.id, 'USER', orgAlphaId, {
+        role: 'all',
+      });
+
+      const foundInC = resC.items.find((p) => p.id === polAlphaId);
+      expect(foundInC).toBeUndefined();
+
+      const resB = await delegationService.getPolicies(deputyB.id, 'USER', orgAlphaId, {
+        role: 'all',
+      });
+      const foundInB = resB.items.find((p) => p.id === polAlphaId);
+      expect(foundInB).toBeDefined();
+    });
+
+    it('4.2. USER từ Org Beta không thể thấy policy của Org Alpha kể cả truyền organizationId của Alpha', async () => {
+      const resBetaUser = await delegationService.getPolicies(directorBeta.id, 'USER', orgBetaId, {
+        role: 'all',
+        organizationId: orgAlphaId,
+      });
+
+      const leakAlpha = resBetaUser.items.find((p) => p.organizationId === orgAlphaId);
+      expect(leakAlpha).toBeUndefined();
+    });
+
+    it('4.3. ADMIN từ Org Beta bị giới hạn trong Org Beta, không xem được Org Alpha', async () => {
+      const resBetaAdmin = await delegationService.getPolicies(directorBeta.id, 'ADMIN', orgBetaId, {
+        organizationId: orgAlphaId,
+      });
+
+      const leakAlpha = resBetaAdmin.items.find((p) => p.organizationId === orgAlphaId);
+      expect(leakAlpha).toBeUndefined();
+    });
+
+    it('4.4. ADMIN Org Alpha xem được toàn bộ policy trong Org Alpha', async () => {
+      const resAlphaAdmin = await delegationService.getPolicies(directorA.id, 'ADMIN', orgAlphaId, {});
+      const found = resAlphaAdmin.items.find((p) => p.id === polAlphaId);
+      expect(found).toBeDefined();
     });
   });
 });

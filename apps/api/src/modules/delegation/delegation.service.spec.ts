@@ -18,6 +18,9 @@ describe('DelegationService (Delegation Policy Engine Unit Tests)', () => {
 
   beforeEach(() => {
     mockPrisma = {
+      $transaction: vi.fn(async (callback: any) => callback(mockPrisma)),
+      $executeRaw: vi.fn().mockResolvedValue(1),
+      $queryRaw: vi.fn().mockResolvedValue([{ id: 'mock-policy-id', is_active: true, start_date: new Date('2026-10-01'), end_date: new Date('2026-12-01') }]),
       user: {
         findUnique: vi.fn(),
       },
@@ -161,6 +164,8 @@ describe('DelegationService (Delegation Policy Engine Unit Tests)', () => {
           id: 'existing-p1',
           delegatorId: 'user-b',
           delegateeId: 'user-a',
+          startDate: new Date('2026-10-20T00:00:00.000Z'),
+          endDate: new Date('2026-11-05T00:00:00.000Z'),
           scopeDepartmentId: null,
           scopeTemplateId: null,
         },
@@ -198,6 +203,8 @@ describe('DelegationService (Delegation Policy Engine Unit Tests)', () => {
           id: 'p-b-c',
           delegatorId: 'user-b',
           delegateeId: 'user-c',
+          startDate: new Date('2026-10-20T00:00:00.000Z'),
+          endDate: new Date('2026-11-05T00:00:00.000Z'),
           scopeDepartmentId: null,
           scopeTemplateId: null,
         },
@@ -205,6 +212,8 @@ describe('DelegationService (Delegation Policy Engine Unit Tests)', () => {
           id: 'p-c-a',
           delegatorId: 'user-c',
           delegateeId: 'user-a',
+          startDate: new Date('2026-10-20T00:00:00.000Z'),
+          endDate: new Date('2026-11-05T00:00:00.000Z'),
           scopeDepartmentId: null,
           scopeTemplateId: null,
         },
@@ -215,7 +224,71 @@ describe('DelegationService (Delegation Policy Engine Unit Tests)', () => {
       ).rejects.toThrow('chu trình ủy quyền khép kín');
     });
 
-    it('1.8. Tạo chính sách thành công, ghi AuditLog và gửi Notification', async () => {
+    it('1.8. Temporal cycle detection: Không chặn chu trình nếu các cạnh không có thời gian giao nhau chung (Disjoint windows)', async () => {
+      // A -> B: tháng 1-3
+      // B -> C: tháng 4-6
+      // Policy mới: C -> A: tháng 2-5
+      const existing = [
+        {
+          id: 'p-a-b',
+          delegatorId: 'user-a',
+          delegateeId: 'user-b',
+          startDate: new Date('2026-01-01T00:00:00.000Z'),
+          endDate: new Date('2026-03-31T23:59:59.000Z'),
+        },
+        {
+          id: 'p-b-c',
+          delegatorId: 'user-b',
+          delegateeId: 'user-c',
+          startDate: new Date('2026-04-01T00:00:00.000Z'),
+          endDate: new Date('2026-06-30T23:59:59.000Z'),
+        },
+      ];
+
+      const newEdge = {
+        delegatorId: 'user-c',
+        delegateeId: 'user-a',
+        startDate: new Date('2026-02-01T00:00:00.000Z'),
+        endDate: new Date('2026-05-31T23:59:59.000Z'),
+      };
+
+      const hasCycle = service.checkTemporalCycle(existing, newEdge);
+      expect(hasCycle).toBe(false);
+    });
+
+    it('1.9. Temporal cycle detection: Phát hiện chu trình khi có thời gian giao nhau chung (Overlapping windows)', async () => {
+      // A -> B: tháng 1-5
+      // B -> C: tháng 3-7
+      // Policy mới: C -> A: tháng 2-6
+      const existing = [
+        {
+          id: 'p-a-b',
+          delegatorId: 'user-a',
+          delegateeId: 'user-b',
+          startDate: new Date('2026-01-01T00:00:00.000Z'),
+          endDate: new Date('2026-05-31T23:59:59.000Z'),
+        },
+        {
+          id: 'p-b-c',
+          delegatorId: 'user-b',
+          delegateeId: 'user-c',
+          startDate: new Date('2026-03-01T00:00:00.000Z'),
+          endDate: new Date('2026-07-31T23:59:59.000Z'),
+        },
+      ];
+
+      const newEdge = {
+        delegatorId: 'user-c',
+        delegateeId: 'user-a',
+        startDate: new Date('2026-02-01T00:00:00.000Z'),
+        endDate: new Date('2026-06-30T23:59:59.000Z'),
+      };
+
+      const hasCycle = service.checkTemporalCycle(existing, newEdge);
+      expect(hasCycle).toBe(true);
+    });
+
+    it('1.10. Tạo chính sách thành công, ghi AuditLog và gửi Notification', async () => {
       mockPrisma.user.findUnique.mockImplementation(({ where }: any) => {
         if (where.id === 'user-a') {
           return Promise.resolve({
@@ -402,6 +475,83 @@ describe('DelegationService (Delegation Policy Engine Unit Tests)', () => {
       expect(result!.policy.id).toBe('policy-template-specific');
       expect(result!.assignee.userId).toBe('director-a');
       expect(result!.delegatorName).toBe('Giam Doc A');
+    });
+
+    it('3.3. Deterministic tie-breaker: Khi score và createdAt hoàn toàn bằng nhau, tie-break bằng id (localeCompare)', async () => {
+      const fixedCreatedAt = new Date('2026-10-22T08:00:00.000Z');
+      const policyAlpha = {
+        id: 'policy-aaa',
+        delegatorId: 'director-a',
+        delegateeId: 'deputy-b',
+        organizationId: 'org-1',
+        scopeDepartmentId: null,
+        scopeTemplateId: null,
+        createdAt: fixedCreatedAt,
+        delegator: { id: 'director-a', fullName: 'Giam Doc A', email: 'a@corp.vn' },
+        delegatee: { id: 'deputy-b', fullName: 'Pho Giam Doc B', email: 'b@corp.vn' },
+      };
+
+      const policyZeta = {
+        id: 'policy-zzz',
+        delegatorId: 'director-a',
+        delegateeId: 'deputy-b',
+        organizationId: 'org-1',
+        scopeDepartmentId: null,
+        scopeTemplateId: null,
+        createdAt: fixedCreatedAt, // createdAt trùng nhau từng mili-giây
+        delegator: { id: 'director-a', fullName: 'Giam Doc A', email: 'a@corp.vn' },
+        delegatee: { id: 'deputy-b', fullName: 'Pho Giam Doc B', email: 'b@corp.vn' },
+      };
+
+      // Đưa policy-aaa trước, policy-zzz sau
+      mockPrisma.delegationPolicy.findMany.mockResolvedValueOnce([
+        policyAlpha,
+        policyZeta,
+      ]);
+
+      const result = await service.resolveActiveDelegation({
+        document: { id: 'doc-1', organizationId: 'org-1' },
+        step: mockStep,
+        actorId: 'deputy-b',
+        now: new Date('2026-10-25T10:00:00Z'),
+      });
+
+      expect(result).not.toBeNull();
+      // 'policy-zzz'.localeCompare('policy-aaa') > 0 -> policy-zzz được chọn một cách nhất quán (deterministic)
+      expect(result!.policy.id).toBe('policy-zzz');
+    });
+  });
+
+  describe('4. getPolicies (Tenant Isolation & RBAC Controls)', () => {
+    it('4.1. USER query với role=all chỉ trả về policy của chính mình (OR: delegatorId = user hoặc delegateeId = user)', async () => {
+      mockPrisma.delegationPolicy.count.mockResolvedValueOnce(0);
+      mockPrisma.delegationPolicy.findMany.mockResolvedValueOnce([]);
+
+      await service.getPolicies('user-1', 'USER', 'org-alpha', { role: 'all' });
+
+      expect(mockPrisma.delegationPolicy.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            organizationId: 'org-alpha',
+            OR: [{ delegatorId: 'user-1' }, { delegateeId: 'user-1' }],
+          },
+        })
+      );
+    });
+
+    it('4.2. ADMIN bị khóa cứng vào organizationId của mình và không thể vượt quyền xem tổ chức khác', async () => {
+      mockPrisma.delegationPolicy.count.mockResolvedValueOnce(0);
+      mockPrisma.delegationPolicy.findMany.mockResolvedValueOnce([]);
+
+      await service.getPolicies('admin-1', 'ADMIN', 'org-alpha', { organizationId: 'org-beta' as any });
+
+      expect(mockPrisma.delegationPolicy.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            organizationId: 'org-alpha', // Khóa cứng vào org của admin, bỏ qua org-beta do client gửi
+          },
+        })
+      );
     });
   });
 });

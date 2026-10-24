@@ -1261,10 +1261,91 @@ async function runLiveTests() {
   }
   console.log('   -> PASS (Thu hồi chính sách ủy quyền thành công qua Live HTTP)\n');
 
+  // Test 49: Cross-Tenant unauthorized access to delegation policy detail blocked
+  console.log('49. Test Cross-Tenant Security: UserB (Company Beta) cố đọc policy của Alpha qua GET /api/delegations/:id:');
+  const resCrossTenantGet = await fetch(`${API_BASE}/delegations/${createdPolicyId}`, {
+    headers: { Authorization: `Bearer ${tokenUserB}` },
+  });
+  console.log(`   HTTP Status: ${resCrossTenantGet.status}`);
+  if (resCrossTenantGet.status !== 403) {
+    throw new Error(`Test 49 thất bại: UserB không bị chặn 403 khi đọc policy của Alpha (nhận ${resCrossTenantGet.status})`);
+  }
+  console.log('   -> PASS (Chặn truy cập chéo tenant giữa các công ty thành công với HTTP 403)\n');
+
+  // Test 50: Non-delegated User in same org cannot access policy detail
+  console.log('50. Test User-Level Authorization: Người ngoài trong cùng tổ chức cố xem chi tiết policy:');
+  // Tạo token cho một user khác trong cùng Alpha (không phải UserA và không phải newApproverAlpha)
+  const otherAlphaUser = await prisma.user.findFirst({
+    where: {
+      organizationId: userA.organizationId!,
+      id: { notIn: [userA.id, newApproverAlpha.id] },
+    },
+  });
+  if (otherAlphaUser) {
+    const tokenOtherAlpha = JwtUtil.sign(
+      {
+        sub: otherAlphaUser.id,
+        email: otherAlphaUser.email,
+        fullName: otherAlphaUser.fullName,
+        role: otherAlphaUser.role,
+        organizationId: otherAlphaUser.organizationId,
+        departmentId: otherAlphaUser.departmentId,
+      },
+      JWT_SECRET,
+      3600
+    );
+    const resUnrelatedUser = await fetch(`${API_BASE}/delegations/${createdPolicyId}`, {
+      headers: { Authorization: `Bearer ${tokenOtherAlpha}` },
+    });
+    console.log(`   HTTP Status: ${resUnrelatedUser.status}`);
+    if (resUnrelatedUser.status !== 403) {
+      throw new Error(`Test 50 thất bại: Người ngoài trong cùng org không bị chặn 403 (nhận ${resUnrelatedUser.status})`);
+    }
+    console.log('   -> PASS (Chặn người không liên quan xem chi tiết policy thành công với HTTP 403)\n');
+  } else {
+    console.log('   -> SKIP (Không có user thứ 3 trong Alpha để test)\n');
+  }
+
+  // Test 51: USER query GET /api/delegations?role=all strictly scoped to own delegations
+  console.log('51. Test GET /api/delegations?role=all: USER không thể dùng role=all để vượt quyền xem toàn bộ tổ chức:');
+  const resRoleAll = await fetch(`${API_BASE}/delegations?role=all`, {
+    headers: { Authorization: `Bearer ${tokenUserA}` },
+  });
+  const bodyRoleAll = await resRoleAll.json();
+  console.log(`   HTTP Status: ${resRoleAll.status} | Returned Policies: ${bodyRoleAll.data?.length}`);
+  if (resRoleAll.status !== 200) {
+    throw new Error('Test 51 thất bại: Không thể truy vấn danh sách policy với role=all');
+  }
+  // Mọi policy trả về PHẢI có delegatorId = userA.id HOẶC delegateeId = userA.id
+  for (const item of (bodyRoleAll.data || [])) {
+    if (item.delegatorId !== userA.id && item.delegateeId !== userA.id) {
+      throw new Error(`Test 51 thất bại: Phát hiện rò rỉ policy của người khác khi USER gọi role=all (id: ${item.id})`);
+    }
+  }
+  console.log('   -> PASS (role=all được giới hạn nghiêm ngặt chỉ trong phạm vi ủy quyền của chính user)\n');
+
+  // Test 52: Query parameter organizationId injection blocked for USER and ADMIN
+  console.log('52. Test Query Parameter Tampering: Client gửi organizationId khác trong query GET /api/delegations:');
+  const resInjectOrg = await fetch(`${API_BASE}/delegations?organizationId=${userA.organizationId}`, {
+    headers: { Authorization: `Bearer ${tokenUserB}` }, // UserB thuộc Beta
+  });
+  const bodyInjectOrg = await resInjectOrg.json();
+  console.log(`   HTTP Status: ${resInjectOrg.status} | Items: ${bodyInjectOrg.data?.length}`);
+  if (resInjectOrg.status !== 200) {
+    throw new Error('Test 52 thất bại: Request bị lỗi không mong muốn');
+  }
+  // Toàn bộ item trả về (nếu có) PHẢI thuộc organization của UserB, TUYỆT ĐỐI không thuộc organization của Alpha
+  for (const item of (bodyInjectOrg.data || [])) {
+    if (item.organizationId === userA.organizationId) {
+      throw new Error('Test 52 thất bại: Rò rỉ dữ liệu của Alpha khi UserB cố tình truyền organizationId của Alpha!');
+    }
+  }
+  console.log('   -> PASS (Backend chặn triệt để tham số organizationId do client gửi, bảo đảm 100% Tenant Isolation)\n');
+
   await prisma.$disconnect();
   console.log('========================================================================');
-  console.log('🎉 TẤT CẢ 48/48 KỊCH BẢN KIỂM THỬ LIVE HTTP & SECURITY TRÊN POSTGRESQL');
-  console.log('   (BAO GỒM REASSIGNMENT, SLA SCHEDULER, NOTIFICATION & DELEGATION ENGINE)');
+  console.log('🎉 TẤT CẢ 52/52 KỊCH BẢN KIỂM THỬ LIVE HTTP & SECURITY TRÊN POSTGRESQL');
+  console.log('   (BAO GỒM REASSIGNMENT, SLA SCHEDULER, NOTIFICATION & DELEGATION SECURITY/CONCURRENCY AUDIT)');
   console.log('   ĐÃ PASS 100%!');
   console.log('========================================================================');
 }

@@ -178,125 +178,117 @@ export class DelegationService {
       }
     }
 
-    // 5. Thuật toán phát hiện chu trình ủy quyền (Cycle & Loop Detection)
-    // Tải toàn bộ các chính sách đang hoạt động có khoảng thời gian giao thoa
-    const overlappingPolicies = await this.prisma.delegationPolicy.findMany({
-      where: {
-        organizationId,
-        isActive: true,
-        startDate: { lte: endDate },
-        endDate: { gte: startDate },
-      },
-      select: {
-        id: true,
-        delegatorId: true,
-        delegateeId: true,
-        scopeDepartmentId: true,
-        scopeTemplateId: true,
-      },
-    });
-
-    // 5.1. Chặn chính sách trùng phạm vi tuyệt đối cho cùng 1 delegator trong thời gian giao thoa
-    const exactDuplicate = overlappingPolicies.find(
-      (p) =>
-        p.delegatorId === delegatorId &&
-        (p.scopeDepartmentId ?? null) === (dto.scopeDepartmentId ?? null) &&
-        (p.scopeTemplateId ?? null) === (dto.scopeTemplateId ?? null)
-    );
-
-    if (exactDuplicate) {
-      throw new BadRequestException(
-        'Đã tồn tại chính sách ủy quyền có phạm vi trùng lặp trong khoảng thời gian này.'
-      );
-    }
-
-    // 5.2. Kiểm tra chu trình có hướng (Directed Cycle Detection using DFS)
-    // Xây dựng đồ thị có hướng: X -> Y có nghĩa là X ủy quyền cho Y
-    const adjList = new Map<string, string[]>();
-    for (const p of overlappingPolicies) {
-      if (!adjList.has(p.delegatorId)) {
-        adjList.set(p.delegatorId, []);
+    // 5. Khởi chạy Transaction với PostgreSQL Advisory Lock theo Organization
+    const createdPolicy = await this.prisma.$transaction(async (tx) => {
+      // 5.0. Khóa tuần tự hóa mức tổ chức để ngăn chặn Race Condition tạo chu trình đồng thời (A->B và B->A)
+      if (typeof (tx as any).$executeRaw === 'function') {
+        await (tx as any).$executeRaw`
+          SELECT pg_advisory_xact_lock(hashtext('delegation_org_' || ${organizationId})::bigint)
+        `;
       }
-      adjList.get(p.delegatorId)!.push(p.delegateeId);
-    }
 
-    // Thêm cạnh đề xuất mới: delegatorId -> delegateeId
-    if (!adjList.has(delegatorId)) {
-      adjList.set(delegatorId, []);
-    }
-    adjList.get(delegatorId)!.push(delegateeId);
+      // 5.1. Tải toàn bộ các chính sách đang hoạt động có khoảng thời gian giao thoa trong cùng tổ chức
+      const overlappingPolicies = await tx.delegationPolicy.findMany({
+        where: {
+          organizationId,
+          isActive: true,
+          startDate: { lte: endDate },
+          endDate: { gte: startDate },
+        },
+        select: {
+          id: true,
+          delegatorId: true,
+          delegateeId: true,
+          startDate: true,
+          endDate: true,
+          scopeDepartmentId: true,
+          scopeTemplateId: true,
+        },
+      });
 
-    // Chạy DFS từ delegateeId xem có thể đi ngược về delegatorId không
-    const hasPath = (current: string, target: string, visited: Set<string>): boolean => {
-      if (current === target) return true;
-      visited.add(current);
-      const neighbors = adjList.get(current) || [];
-      for (const next of neighbors) {
-        if (!visited.has(next)) {
-          if (hasPath(next, target, visited)) return true;
-        }
-      }
-      return false;
-    };
-
-    if (hasPath(delegateeId, delegatorId, new Set<string>())) {
-      throw new BadRequestException(
-        `Phát hiện chu trình ủy quyền khép kín (Delegation Cycle): Người nhận ủy quyền "${delegatee.fullName}" đã ủy quyền trực tiếp hoặc gián tiếp ngược lại cho "${delegator.fullName}". Không thể tạo chính sách.`
+      // 5.2. Chặn chính sách trùng phạm vi tuyệt đối cho cùng 1 delegator trong thời gian giao thoa
+      const exactDuplicate = overlappingPolicies.find(
+        (p) =>
+          p.delegatorId === delegatorId &&
+          (p.scopeDepartmentId ?? null) === (dto.scopeDepartmentId ?? null) &&
+          (p.scopeTemplateId ?? null) === (dto.scopeTemplateId ?? null)
       );
-    }
 
-    // 6. Lưu vào Cơ sở dữ liệu
-    const policy = await this.prisma.delegationPolicy.create({
-      data: {
-        organizationId,
+      if (exactDuplicate) {
+        throw new BadRequestException(
+          'Đã tồn tại chính sách ủy quyền có phạm vi trùng lặp trong khoảng thời gian này.'
+        );
+      }
+
+      // 5.3. Thuật toán phát hiện chu trình có hướng phụ thuộc thời gian (Temporal Directed Cycle Detection)
+      const hasCycle = this.checkTemporalCycle(overlappingPolicies, {
         delegatorId,
         delegateeId,
         startDate,
         endDate,
-        scopeDepartmentId: dto.scopeDepartmentId || null,
-        scopeTemplateId: dto.scopeTemplateId || null,
-        reason: dto.reason?.trim() || null,
-        createdById: actorId,
-        isActive: true,
-      },
-      include: {
-        delegator: { select: { fullName: true, email: true } },
-        delegatee: { select: { fullName: true, email: true } },
-        createdBy: { select: { fullName: true } },
-        scopeDepartment: { select: { name: true } },
-        scopeTemplate: { select: { title: true } },
-      },
-    });
+      });
 
-    // 7. Ghi AuditLog
-    await this.prisma.auditLog.create({
-      data: {
-        userId: actorId,
-        action: AuditAction.CREATE_DELEGATION_POLICY,
-        details: {
-          policyId: policy.id,
+      if (hasCycle) {
+        throw new BadRequestException(
+          `Phát hiện chu trình ủy quyền khép kín (Delegation Cycle): Người nhận ủy quyền "${delegatee.fullName}" đã ủy quyền trực tiếp hoặc gián tiếp ngược lại cho "${delegator.fullName}" trong cùng khoảng thời gian hiệu lực. Không thể tạo chính sách.`
+        );
+      }
+
+      // 6. Lưu vào Cơ sở dữ liệu trong cùng transaction
+      const policy = await tx.delegationPolicy.create({
+        data: {
+          organizationId,
           delegatorId,
-          delegatorName: delegator.fullName,
           delegateeId,
-          delegateeName: delegatee.fullName,
-          startDate: startDate.toISOString(),
-          endDate: endDate.toISOString(),
-          scopeDepartmentId: dto.scopeDepartmentId,
-          scopeTemplateId: dto.scopeTemplateId,
-          reason: dto.reason,
+          startDate,
+          endDate,
+          scopeDepartmentId: dto.scopeDepartmentId || null,
+          scopeTemplateId: dto.scopeTemplateId || null,
+          reason: dto.reason?.trim() || null,
+          createdById: actorId,
+          isActive: true,
         },
-      },
+        include: {
+          delegator: { select: { fullName: true, email: true } },
+          delegatee: { select: { fullName: true, email: true } },
+          createdBy: { select: { fullName: true } },
+          scopeDepartment: { select: { name: true } },
+          scopeTemplate: { select: { title: true } },
+        },
+      });
+
+      // 7. Ghi AuditLog
+      await tx.auditLog.create({
+        data: {
+          userId: actorId,
+          action: AuditAction.CREATE_DELEGATION_POLICY,
+          details: {
+            policyId: policy.id,
+            delegatorId,
+            delegatorName: delegator.fullName,
+            delegateeId,
+            delegateeName: delegatee.fullName,
+            startDate: startDate.toISOString(),
+            endDate: endDate.toISOString(),
+            scopeDepartmentId: dto.scopeDepartmentId,
+            scopeTemplateId: dto.scopeTemplateId,
+            reason: dto.reason,
+          },
+        },
+      });
+
+      return policy;
     });
 
-    // 8. Gửi In-App Notification cho người nhận ủy quyền
+    // 8. Gửi In-App Notification cho người nhận ủy quyền (ngoài transaction để đảm bảo reliability)
     await this.notificationService.createNotification({
       userId: delegateeId,
       type: NotificationType.DELEGATION_ASSIGNED,
       title: 'Bạn nhận được quyền ủy quyền phê duyệt',
       content: `Cán bộ ${delegator.fullName} đã ủy quyền phê duyệt cho bạn từ ngày ${startDate.toLocaleDateString('vi-VN')} đến ngày ${endDate.toLocaleDateString('vi-VN')}.`,
-      idempotencyKey: `DELEGATION_ASSIGNED:${policy.id}:${delegateeId}`,
+      idempotencyKey: `DELEGATION_ASSIGNED:${createdPolicy.id}:${delegateeId}`,
       metadata: {
-        policyId: policy.id,
+        policyId: createdPolicy.id,
         delegatorId,
         delegatorName: delegator.fullName,
         startDate: startDate.toISOString(),
@@ -304,7 +296,80 @@ export class DelegationService {
       },
     });
 
-    return this.mapToView(policy);
+    return this.mapToView(createdPolicy);
+  }
+
+  /**
+   * Thuật toán DFS phát hiện chu trình có hướng phụ thuộc thời gian (Temporal Directed Cycle Detection):
+   * Một chu trình e_1 -> e_2 -> ... -> e_k chỉ thực sự hình thành nếu khoảng thời gian giao nhau
+   * của TOÀN BỘ các cạnh trên chu trình là khác rỗng: ∩ [start_i, end_i] ≠ ∅.
+   */
+  public checkTemporalCycle(
+    existingPolicies: Array<{
+      id?: string;
+      delegatorId: string;
+      delegateeId: string;
+      startDate: Date;
+      endDate: Date;
+    }>,
+    newEdge: {
+      delegatorId: string;
+      delegateeId: string;
+      startDate: Date;
+      endDate: Date;
+    }
+  ): boolean {
+    const adj = new Map<string, Array<{ target: string; start: number; end: number }>>();
+    for (const p of existingPolicies) {
+      if (!adj.has(p.delegatorId)) {
+        adj.set(p.delegatorId, []);
+      }
+      adj.get(p.delegatorId)!.push({
+        target: p.delegateeId,
+        start: new Date(p.startDate).getTime(),
+        end: new Date(p.endDate).getTime(),
+      });
+    }
+
+    const target = newEdge.delegatorId;
+    const startNode = newEdge.delegateeId;
+    const initStart = new Date(newEdge.startDate).getTime();
+    const initEnd = new Date(newEdge.endDate).getTime();
+
+    if (startNode === target) return true;
+
+    const visitedInPath = new Set<string>();
+
+    const dfs = (current: string, curStart: number, curEnd: number): boolean => {
+      visitedInPath.add(current);
+      const edges = adj.get(current) || [];
+
+      for (const edge of edges) {
+        const nextStart = Math.max(curStart, edge.start);
+        const nextEnd = Math.min(curEnd, edge.end);
+
+        // Nếu không có khoảng thời gian giao nhau hợp lệ, không thể tạo chu trình đồng thời
+        if (nextStart > nextEnd) {
+          continue;
+        }
+
+        // Tìm thấy đường đi khép kín về target với thời gian giao thoa thực sự
+        if (edge.target === target) {
+          return true;
+        }
+
+        if (!visitedInPath.has(edge.target)) {
+          if (dfs(edge.target, nextStart, nextEnd)) {
+            return true;
+          }
+        }
+      }
+
+      visitedInPath.delete(current);
+      return false;
+    };
+
+    return dfs(startNode, initStart, initEnd);
   }
 
   /**
@@ -317,6 +382,7 @@ export class DelegationService {
     query: {
       isActive?: boolean;
       role?: 'delegator' | 'delegatee' | 'all';
+      organizationId?: string;
       page?: number;
       limit?: number;
     }
@@ -327,16 +393,26 @@ export class DelegationService {
 
     const where: any = {};
 
-    // Phân quyền theo vai trò (RBAC)
+    // Phân quyền theo vai trò (RBAC) & Tenant Isolation tuyệt đối
     if (actorRole === 'USER') {
+      if (!actorOrgId) {
+        throw new ForbiddenException('Người dùng không thuộc tổ chức nào.');
+      }
+      // USER chỉ thấy policy trong tổ chức của mình
+      where.organizationId = actorOrgId;
       if (query.role === 'delegator') {
         where.delegatorId = actorId;
       } else if (query.role === 'delegatee') {
         where.delegateeId = actorId;
       } else {
+        // Dù truyền role=all hay không truyền, USER chỉ được xem policy mà mình là delegator hoặc delegatee
         where.OR = [{ delegatorId: actorId }, { delegateeId: actorId }];
       }
     } else if (actorRole === 'ADMIN') {
+      if (!actorOrgId) {
+        throw new ForbiddenException('Quản trị viên không thuộc tổ chức nào.');
+      }
+      // ADMIN bị khóa chặt vào organizationId của mình, không thể xem chéo tổ chức dù client gửi organizationId khác
       where.organizationId = actorOrgId;
       if (query.role === 'delegator') {
         where.delegatorId = actorId;
@@ -344,8 +420,16 @@ export class DelegationService {
         where.delegateeId = actorId;
       }
     } else if (actorRole === 'SUPER_ADMIN') {
-      if (actorOrgId) {
+      // SUPER_ADMIN có quyền truy cập toàn cầu, có thể lọc theo organizationId nếu được chỉ định
+      if (query.organizationId) {
+        where.organizationId = query.organizationId;
+      } else if (actorOrgId) {
         where.organizationId = actorOrgId;
+      }
+      if (query.role === 'delegator') {
+        where.delegatorId = actorId;
+      } else if (query.role === 'delegatee') {
+        where.delegateeId = actorId;
       }
     }
 
@@ -420,7 +504,7 @@ export class DelegationService {
   }
 
   /**
-   * Cập nhật chính sách ủy quyền
+   * Cập nhật chính sách ủy quyền với kiểm soát tương tranh và chu trình có hướng
    */
   async updatePolicy(
     policyId: string,
@@ -456,52 +540,128 @@ export class DelegationService {
       throw new BadRequestException('Không thể chỉnh sửa chính sách đã hết thời hạn hiệu lực.');
     }
 
-    const data: any = {};
+    const newEndDate = dto.endDate ? new Date(dto.endDate) : policy.endDate;
     if (dto.endDate) {
-      const newEndDate = new Date(dto.endDate);
       if (isNaN(newEndDate.getTime()) || newEndDate <= policy.startDate) {
         throw new BadRequestException('Thời gian kết thúc mới phải sau thời gian bắt đầu.');
       }
-      data.endDate = newEndDate;
     }
 
-    if (dto.reason !== undefined) {
-      data.reason = dto.reason ? dto.reason.trim() : null;
+    // Kiểm tra phạm vi (Scope validation)
+    if (dto.scopeDepartmentId) {
+      const dept = await this.prisma.department.findUnique({
+        where: { id: dto.scopeDepartmentId },
+      });
+      if (!dept || dept.organizationId !== policy.organizationId) {
+        throw new BadRequestException('Phòng ban trong phạm vi ủy quyền không tồn tại hoặc không thuộc tổ chức này.');
+      }
     }
 
-    if (dto.scopeDepartmentId !== undefined) {
-      data.scopeDepartmentId = dto.scopeDepartmentId || null;
+    if (dto.scopeTemplateId) {
+      const template = await this.prisma.formTemplate.findUnique({
+        where: { id: dto.scopeTemplateId },
+      });
+      if (
+        !template ||
+        (template.organizationId && template.organizationId !== policy.organizationId)
+      ) {
+        throw new BadRequestException(
+          'Biểu mẫu trong phạm vi ủy quyền không tồn tại hoặc không thuộc quyền quản lý của tổ chức.'
+        );
+      }
     }
 
-    if (dto.scopeTemplateId !== undefined) {
-      data.scopeTemplateId = dto.scopeTemplateId || null;
-    }
+    const data: any = {};
+    if (dto.endDate) data.endDate = newEndDate;
+    if (dto.reason !== undefined) data.reason = dto.reason ? dto.reason.trim() : null;
+    if (dto.scopeDepartmentId !== undefined) data.scopeDepartmentId = dto.scopeDepartmentId || null;
+    if (dto.scopeTemplateId !== undefined) data.scopeTemplateId = dto.scopeTemplateId || null;
 
-    const updated = await this.prisma.delegationPolicy.update({
-      where: { id: policyId },
-      data,
-      include: {
-        delegator: { select: { fullName: true, email: true } },
-        delegatee: { select: { fullName: true, email: true } },
-        createdBy: { select: { fullName: true } },
-        scopeDepartment: { select: { name: true } },
-        scopeTemplate: { select: { title: true } },
-      },
-    });
+    return await this.prisma.$transaction(async (tx) => {
+      // Khóa tuần tự hóa theo organization để tránh race condition khi cập nhật policy đồng thời
+      if (typeof (tx as any).$executeRaw === 'function') {
+        await (tx as any).$executeRaw`
+          SELECT pg_advisory_xact_lock(hashtext('delegation_org_' || ${policy.organizationId})::bigint)
+        `;
+      }
 
-    await this.prisma.auditLog.create({
-      data: {
-        userId: actorId,
-        action: AuditAction.UPDATE_DELEGATION_POLICY,
-        details: { policyId, updatedFields: data },
-      },
-    });
+      // Khóa bi quan hàng policy để đảm bảo nhất quán với revokePolicy
+      if (typeof (tx as any).$queryRaw === 'function') {
+        await (tx as any).$queryRaw`
+          SELECT id FROM delegation_policies WHERE id = ${policyId} FOR UPDATE
+        `;
+      }
 
-    return this.mapToView(updated);
+      // Tái xác minh trạng thái trong transaction
+      const currentInTx = await tx.delegationPolicy.findUnique({
+        where: { id: policyId },
+      });
+
+      if (!currentInTx || !currentInTx.isActive) {
+        throw new BadRequestException('Không thể chỉnh sửa chính sách đã bị thu hồi trong quá trình xử lý.');
+      }
+
+      // Nếu kéo dài thời gian kết thúc hoặc thay đổi phạm vi, chạy lại phát hiện chu trình (Temporal Cycle Detection)
+      if (dto.endDate || dto.scopeDepartmentId !== undefined || dto.scopeTemplateId !== undefined) {
+        const otherPolicies = await tx.delegationPolicy.findMany({
+          where: {
+            organizationId: policy.organizationId,
+            isActive: true,
+            id: { not: policyId },
+            startDate: { lte: newEndDate },
+            endDate: { gte: policy.startDate },
+          },
+          select: {
+            id: true,
+            delegatorId: true,
+            delegateeId: true,
+            startDate: true,
+            endDate: true,
+            scopeDepartmentId: true,
+            scopeTemplateId: true,
+          },
+        });
+
+        const hasCycle = this.checkTemporalCycle(otherPolicies, {
+          delegatorId: policy.delegatorId,
+          delegateeId: policy.delegateeId,
+          startDate: policy.startDate,
+          endDate: newEndDate,
+        });
+
+        if (hasCycle) {
+          throw new BadRequestException(
+            'Cập nhật chính sách tạo ra chu trình ủy quyền khép kín (Delegation Cycle) trong khoảng thời gian mới. Không thể thực hiện cập nhật.'
+          );
+        }
+      }
+
+      const updated = await tx.delegationPolicy.update({
+        where: { id: policyId },
+        data,
+        include: {
+          delegator: { select: { fullName: true, email: true } },
+          delegatee: { select: { fullName: true, email: true } },
+          createdBy: { select: { fullName: true } },
+          scopeDepartment: { select: { name: true } },
+          scopeTemplate: { select: { title: true } },
+        },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          userId: actorId,
+          action: AuditAction.UPDATE_DELEGATION_POLICY,
+          details: { policyId, updatedFields: data },
+        },
+      });
+
+      return updated;
+    }).then((updated) => this.mapToView(updated));
   }
 
   /**
-   * Thu hồi chính sách ủy quyền (Soft Revoke)
+   * Thu hồi chính sách ủy quyền (Soft Revoke) phối hợp khóa bi quan với luồng phê duyệt
    */
   async revokePolicy(
     policyId: string,
@@ -510,69 +670,80 @@ export class DelegationService {
     actorOrgId: string | null,
     reason?: string
   ): Promise<DelegationPolicyView> {
-    const policy = await this.prisma.delegationPolicy.findUnique({
-      where: { id: policyId },
-      include: {
-        delegator: { select: { fullName: true, email: true } },
-        delegatee: { select: { fullName: true, email: true } },
-      },
-    });
+    const { revoked, policy, now } = await this.prisma.$transaction(async (tx) => {
+      // 1. Khóa bi quan hàng policy (FOR UPDATE) để phối hợp với transaction phê duyệt
+      if (typeof (tx as any).$queryRaw === 'function') {
+        await (tx as any).$queryRaw`
+          SELECT id FROM delegation_policies WHERE id = ${policyId} FOR UPDATE
+        `;
+      }
 
-    if (!policy) {
-      throw new NotFoundException('Không tìm thấy chính sách ủy quyền.');
-    }
-
-    // Kiểm tra quyền thu hồi
-    const isDelegator = policy.delegatorId === actorId;
-    const isOrgAdmin =
-      actorRole === 'ADMIN' && policy.organizationId === actorOrgId;
-    const isSuperAdmin = actorRole === 'SUPER_ADMIN';
-
-    if (!isDelegator && !isOrgAdmin && !isSuperAdmin) {
-      throw new ForbiddenException('Bạn không có quyền thu hồi chính sách ủy quyền này.');
-    }
-
-    if (!policy.isActive) {
-      throw new BadRequestException('Chính sách ủy quyền này đã được thu hồi trước đó.');
-    }
-
-    const now = new Date();
-    const revoked = await this.prisma.delegationPolicy.update({
-      where: { id: policyId },
-      data: {
-        isActive: false,
-        revokedAt: now,
-        revokedById: actorId,
-        reason: reason
-          ? `${policy.reason || ''} [Lý do thu hồi: ${reason.trim()}]`.trim()
-          : policy.reason,
-      },
-      include: {
-        delegator: { select: { fullName: true, email: true } },
-        delegatee: { select: { fullName: true, email: true } },
-        createdBy: { select: { fullName: true } },
-        scopeDepartment: { select: { name: true } },
-        scopeTemplate: { select: { title: true } },
-      },
-    });
-
-    // Ghi AuditLog
-    await this.prisma.auditLog.create({
-      data: {
-        userId: actorId,
-        action: AuditAction.REVOKE_DELEGATION_POLICY,
-        details: {
-          policyId,
-          revokedById: actorId,
-          delegatorId: policy.delegatorId,
-          delegateeId: policy.delegateeId,
-          revokedAt: now.toISOString(),
-          reason,
+      const foundPolicy = await tx.delegationPolicy.findUnique({
+        where: { id: policyId },
+        include: {
+          delegator: { select: { fullName: true, email: true } },
+          delegatee: { select: { fullName: true, email: true } },
         },
-      },
+      });
+
+      if (!foundPolicy) {
+        throw new NotFoundException('Không tìm thấy chính sách ủy quyền.');
+      }
+
+      // Kiểm tra quyền thu hồi
+      const isDelegator = foundPolicy.delegatorId === actorId;
+      const isOrgAdmin =
+        actorRole === 'ADMIN' && foundPolicy.organizationId === actorOrgId;
+      const isSuperAdmin = actorRole === 'SUPER_ADMIN';
+
+      if (!isDelegator && !isOrgAdmin && !isSuperAdmin) {
+        throw new ForbiddenException('Bạn không có quyền thu hồi chính sách ủy quyền này.');
+      }
+
+      if (!foundPolicy.isActive) {
+        throw new BadRequestException('Chính sách ủy quyền này đã được thu hồi trước đó.');
+      }
+
+      const revokeTime = new Date();
+      const updated = await tx.delegationPolicy.update({
+        where: { id: policyId },
+        data: {
+          isActive: false,
+          revokedAt: revokeTime,
+          revokedById: actorId,
+          reason: reason
+            ? `${foundPolicy.reason || ''} [Lý do thu hồi: ${reason.trim()}]`.trim()
+            : foundPolicy.reason,
+        },
+        include: {
+          delegator: { select: { fullName: true, email: true } },
+          delegatee: { select: { fullName: true, email: true } },
+          createdBy: { select: { fullName: true } },
+          scopeDepartment: { select: { name: true } },
+          scopeTemplate: { select: { title: true } },
+        },
+      });
+
+      // Ghi AuditLog
+      await tx.auditLog.create({
+        data: {
+          userId: actorId,
+          action: AuditAction.REVOKE_DELEGATION_POLICY,
+          details: {
+            policyId,
+            revokedById: actorId,
+            delegatorId: foundPolicy.delegatorId,
+            delegateeId: foundPolicy.delegateeId,
+            revokedAt: revokeTime.toISOString(),
+            reason,
+          },
+        },
+      });
+
+      return { revoked: updated, policy: foundPolicy, now: revokeTime };
     });
 
-    // Gửi thông báo cho delegatee
+    // Gửi thông báo cho delegatee ngoài transaction
     await this.notificationService.createNotification({
       userId: policy.delegateeId,
       type: NotificationType.DELEGATION_REVOKED,
@@ -670,10 +841,14 @@ export class DelegationService {
       return null;
     }
 
-    // Sắp xếp theo score giảm dần, nếu bằng điểm lấy policy có createdAt mới nhất (Deterministic)
+    // Sắp xếp theo score giảm dần. Nếu trùng điểm:
+    // 1. So sánh createdAt mới nhất.
+    // 2. Nếu cả createdAt cũng trùng nhau, tie-break bằng id (alphabetical desc) để đảm bảo 100% deterministic
     scoredCandidates.sort((a, b) => {
       if (b.score !== a.score) return b.score - a.score;
-      return b.policy.createdAt.getTime() - a.policy.createdAt.getTime();
+      const timeDiff = b.policy.createdAt.getTime() - a.policy.createdAt.getTime();
+      if (timeDiff !== 0) return timeDiff;
+      return b.policy.id.localeCompare(a.policy.id);
     });
 
     const chosen = scoredCandidates[0].policy;

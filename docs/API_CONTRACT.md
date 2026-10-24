@@ -989,12 +989,13 @@ Hệ thống cung cấp service quét định kỳ (mặc định mỗi 5 phút)
 - **Query Params:**
   - `isActive`: `true` | `false` (Lọc theo trạng thái hiệu lực)
   - `role`: `'delegator'` | `'delegatee'` | `'all'` (Mặc định: `'all'`)
+  - `organizationId`: string (Chỉ có hiệu lực đối với `SUPER_ADMIN`; đối với `USER` và `ADMIN`, backend luôn khóa chặt theo `actorOrgId`, client không thể tiêm nhiễm qua query param)
   - `page`: số trang (mặc định 1)
   - `limit`: số bản ghi trên trang (mặc định 20, tối đa 100)
-- **Quyền hạn & Tenant Isolation:**
-  - `USER`: Chỉ xem các chính sách mà mình là người ủy quyền hoặc người nhận ủy quyền.
-  - `ADMIN`: Xem tất cả chính sách trong tổ chức của mình.
-  - `SUPER_ADMIN`: Xem chính sách toàn hệ thống.
+- **Quyền hạn & Tenant Isolation (Phase 12.1.1 Audit):**
+  - `USER`: Khóa chặt vào `organizationId` của chính mình. Dù truyền `role=all` hay không truyền, backend bắt buộc lọc `OR: [{ delegatorId: actorId }, { delegateeId: actorId }]`. Tuyệt đối không thể xem policy của người khác trong cùng tổ chức.
+  - `ADMIN`: Khóa chặt vào `organizationId` được phân quyền quản lý. Bỏ qua mọi tham số `organizationId` do client gửi.
+  - `SUPER_ADMIN`: Quyền truy cập toàn cầu, có thể lọc theo `organizationId` nếu được chỉ định.
 - **Response Thành Công (200 OK):**
 ```json
 {
@@ -1021,7 +1022,7 @@ Hệ thống cung cấp service quét định kỳ (mặc định mỗi 5 phút)
 
 #### ③ Xem chi tiết chính sách ủy quyền
 - **Endpoint:** `GET /api/delegations/:id`
-- **Quyền hạn:** `delegator`, `delegatee`, `ADMIN` của tổ chức sở hữu, hoặc `SUPER_ADMIN`. Người ngoài bị chặn `403 Forbidden`.
+- **Quyền hạn:** `delegator`, `delegatee`, `ADMIN` của tổ chức sở hữu, hoặc `SUPER_ADMIN`. Người ngoài và user khác tổ chức bị chặn `403 Forbidden`.
 
 #### ④ Cập nhật chính sách ủy quyền
 - **Endpoint:** `PATCH /api/delegations/:id`
@@ -1034,13 +1035,19 @@ Hệ thống cung cấp service quét định kỳ (mặc định mỗi 5 phút)
   "scopeTemplateId": null
 }
 ```
-- **Ràng buộc:** Không được sửa chính sách đã bị thu hồi (`isActive: false`) hoặc đã quá hạn (`endDate <= now`).
+- **Ràng buộc & Kiểm soát Tương tranh (Phase 12.1.1):**
+  - Thực thi trong transaction với PostgreSQL Advisory Lock theo tổ chức: `pg_advisory_xact_lock(hashtext('delegation_org_' || organizationId)::bigint)`.
+  - Khóa bi quan hàng policy (`FOR UPDATE`) để ngăn chặn xung đột với `revokePolicy`.
+  - Chạy lại thuật toán phát hiện chu trình phụ thuộc thời gian (Temporal Cycle Detection) nếu kéo dài `endDate` hoặc thay đổi phạm vi.
+  - Không được sửa chính sách đã bị thu hồi (`isActive: false`) hoặc đã quá hạn (`endDate <= now`).
 
 #### ⑤ Thu hồi chính sách ủy quyền (Soft Revoke)
 - **Endpoint:** `POST /api/delegations/:id/revoke`
 - **Quyền hạn:** Delegator, Admin cùng công ty, hoặc Super Admin.
 - **Request Body:** `{ "reason": "Chuyến công tác kết thúc sớm" }`
-- **Cơ chế:** Chuyển `isActive = false`, ghi nhận `revokedAt`, `revokedById`, ghi `AuditLog` và gửi `Notification` thông báo cho người nhận ủy quyền.
+- **Cơ chế Khóa Bi quan (Pessimistic Row Lock):**
+  - Thực thi trong transaction và khóa hàng policy bằng `SELECT id FROM delegation_policies WHERE id = $1 FOR UPDATE`.
+  - Chuyển `isActive = false`, ghi nhận `revokedAt`, `revokedById`, ghi `AuditLog` và gửi `Notification` in-app cho người nhận ủy quyền.
 
 ---
 
@@ -1054,17 +1061,250 @@ Khi người dùng gọi `POST /api/documents/:id/decision`:
      - **2 điểm:** Khớp `scopeTemplateId`.
      - **1 điểm:** Khớp `scopeDepartmentId`.
      - **0 điểm:** Toàn tổ chức (cả 2 scope đều null).
-   - **Tie-breaking:** Nếu nhiều chính sách có cùng điểm ưu tiên, chính sách được tạo gần nhất (`createdAt` mới nhất) sẽ được áp dụng (Deterministic Resolution).
-3. **Attribution & Audit Trail:**
+   - **Deterministic Tie-breaking (Phase 12.1.1 Audit):**
+     - Tiêu chí 1: Điểm Specificity Score giảm dần.
+     - Tiêu chí 2: `createdAt` mới nhất.
+     - Tiêu chí 3: Nếu cả `score` và `createdAt` bằng nhau tuyệt đối, tie-break bằng `id` (`b.policy.id.localeCompare(a.policy.id)`). Đảm bảo 100% tất định (không chọn ngẫu nhiên).
+3. **Phối hợp Tương tranh Revoke vs Approve (Phase 12.1.1):**
+   - Khi áp dụng ủy quyền, transaction phê duyệt khóa hàng policy tương ứng bằng `SELECT id, "isActive", "startDate", "endDate" FROM delegation_policies WHERE id = $1 FOR UPDATE`.
+   - Nếu transaction `revokePolicy` đã đi trước và cam kết `isActive = false`: Phê duyệt bị từ chối ngay lập tức với `403 Forbidden` (`Chính sách ủy quyền đã bị thu hồi hoặc hết thời hạn hiệu lực trong quá trình xử lý.`).
+   - Nếu transaction `processAssigneeDecision` đi trước: Phê duyệt được ghi nhận hợp lệ, đầy đủ attribution. Sau đó transaction `revokePolicy` mới thu hồi chính sách cho các tài liệu về sau.
+   - Tránh hoàn toàn race condition và không có nguy cơ deadlock do thứ tự khóa được chuẩn hóa (Document $\rightarrow$ Policy).
+4. **Attribution & Audit Trail:**
    - Cập nhật quyết định của ghế duyệt ban đầu (`targetAssignee`) trong FSM, bảo toàn hoàn toàn completion rule và transition state.
    - Bản ghi `StepDecisionHistory` lưu:
      - `userId`: ID của người thực tế bấm duyệt (actual actor).
      - `isDelegated`: `true`.
      - `delegatedFromUserId`: ID của người ủy quyền ban đầu.
      - `delegationPolicyId`: ID chính sách đã áp dụng.
-   - Bản ghi `SignatureEvent` gắn chữ ký điện tử thực tế của actual actor.
+   - Bản ghi `SignatureEvent` gắn chữ ký điện tử thực tế của actual actor (chữ ký ảnh / audit trail, không giả định là chữ ký số PKI cryptographic signing - tính năng ký số PKI thuộc Phase 13).
    - Bản ghi `AuditLog` lưu chi tiết ủy quyền và gửi thông báo in-app cho người ủy quyền biết hành động đã được thực hiện thay mặt mình.
 
+---
 
+### 9.4. Thuật toán Phát hiện Chu trình Phụ thuộc Thời gian (Temporal Cycle Detection)
+- Chu trình có hướng $e_1 \rightarrow e_2 \rightarrow \ldots \rightarrow e_k$ chỉ thực sự tồn tại nếu khoảng thời gian giao thoa của toàn bộ các cạnh dọc theo chu trình là **khác rỗng**:
+  $$\bigcap_{i=1}^k [start_i, end_i] \ne \emptyset \iff \max(start_i) \le \min(end_i)$$
+- **Thuật toán DFS:**
+  - Khởi tạo cửa sổ giao thoa ban đầu $[S_{\text{accum}}, E_{\text{accum}}] = [S_{\text{new}}, E_{\text{new}}]$ cho cạnh đề xuất $u \rightarrow v$.
+  - Duyệt DFS từ $v$ tìm đường về $u$.
+  - Tại mỗi cạnh $p$: Tính $[S', E'] = [\max(S_{\text{accum}}, S_p), \min(E_{\text{accum}}, E_p)]$. Nếu $S' > E'$, cắt nhánh (prune) vì không có giao thoa thời gian đồng thời.
+  - Nếu đến được $u$ với $S' \le E'$, phát hiện chu trình đồng thời thực sự và từ chối `400 Bad Request`.
+- **Loại trừ chính sách không tạo chu trình:**
+  - Chính sách đã bị thu hồi (`isActive: false`).
+  - Chính sách ngoài khoảng thời gian hiệu lực.
+  - Chính sách thuộc các tổ chức khác nhau (Tenant Isolation).
+  - Các đường đi khép kín nhưng có thời điểm hiệu lực rời rạc (Disjoint temporal windows) được phép tạo bình thường, không bị false positive.
 
+---
 
+## 10. CHUẨN API KÝ SỐ MẬT MÃ PDF & XÁC MINH ĐỘC LẬP (PHASE 13)
+
+Phần này quy định các giao ước API phục vụ việc ký số mật mã (PAdES CMS Detached Signature), quản lý chứng thư X.509, tải tệp PDF đã ký và xác minh tính toàn vẹn độc lập.
+
+### 10.1. Khởi tạo yêu cầu ký số tài liệu
+- **Endpoint:** `POST /api/documents/:id/sign`
+- **Mục đích:** Thực hiện ký số mật mã PAdES trên tệp PDF của tài liệu.
+- **Quyền hạn (Authorization):**
+  - Người dùng (`USER`) hiện là người duyệt hợp lệ của bước hiện tại (`IN_PROGRESS`), HOẶC người nhận ủy quyền hợp lệ (`isDelegated = true`), HOẶC `ADMIN` cùng công ty (ký niêm phong tài liệu đã `APPROVED`).
+  - Bị chặn `403 FORBIDDEN` nếu tài liệu thuộc công ty khác (`tenant isolation`).
+- **Headers:**
+  - `Authorization: Bearer <JWT>`
+  - `Idempotency-Key: <UUID>` (Khuyến nghị để chống gửi lại yêu cầu ký)
+- **Request Body:**
+  ```json
+  {
+    "stepId": "0e1c2a3b-4d5e-6f7a-8b9c-0d1e2f3a4b5c",
+    "certificateId": "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d",
+    "signatureType": "CRYPTOGRAPHIC_PADES",
+    "visualSignaturePlacement": {
+      "page": 1,
+      "x": 350,
+      "y": 150,
+      "width": 120,
+      "height": 50,
+      "imageUrl": "/signatures/userA.png"
+    },
+    "reason": "Phê duyệt tờ trình mua sắm máy tính làm việc"
+  }
+  ```
+- **Xử lý tương tranh & Idempotency:**
+  - Áp dụng PostgreSQL Transaction Advisory Lock theo `documentId` để tuần tự hóa các thao tác ký đồng thời.
+  - Kiểm tra trạng thái bước và phiên bản tài liệu. Nếu tài liệu đã được ký trước đó với cùng `idempotencyKey`, trả về ngay kết quả đã lưu mà không ký lặp.
+- **Response Thành công (HTTP 200 OK):**
+  ```json
+  {
+    "success": true,
+    "data": {
+      "artifactId": "9f8e7d6c-5b4a-3f2e-1d0c-9b8a7f6e5d4c",
+      "documentId": "11111111-2222-3333-4444-555555555555",
+      "versionNumber": 1,
+      "stepId": "0e1c2a3b-4d5e-6f7a-8b9c-0d1e2f3a4b5c",
+      "signer": {
+        "userId": "00000000-0000-0000-0000-000000000001",
+        "fullName": "Nguyễn Văn A",
+        "isDelegated": false,
+        "delegatedFromUserId": null
+      },
+      "certificate": {
+        "id": "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d",
+        "subjectDn": "CN=Nguyễn Văn A, O=Tập đoàn VinaGroup, C=VN",
+        "serialNumber": "5F3A89BC1200E4"
+      },
+      "hashes": {
+        "formDataHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "rawPdfHash": "c2b1a09876543210fedcba9876543210abcdef0123456789abcdef0123456789",
+        "signedPdfHash": "a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4"
+      },
+      "signedAt": "2026-10-25T10:00:00.000Z",
+      "downloadUrl": "/api/documents/11111111-2222-3333-4444-555555555555/signed-pdf"
+    },
+    "timestamp": "2026-10-25T10:00:00.500Z"
+  }
+  ```
+- **Mã lỗi thường gặp:**
+  - `400 VALIDATION_ERROR`: Chứng thư không thuộc về người dùng, chứng thư hết hạn hoặc bị thu hồi.
+  - `403 FORBIDDEN`: Không có quyền duyệt bước này, hoặc ủy quyền đã bị thu hồi trong lúc xử lý.
+  - `404 DOCUMENT_NOT_FOUND`: Tài liệu không tồn tại.
+  - `409 CONFLICT`: Bước đã hoàn thành từ trước, hoặc tài liệu đang ở trạng thái không cho phép ký.
+
+---
+
+### 10.2. Tra cứu trạng thái ký số của tài liệu
+- **Endpoint:** `GET /api/documents/:id/sign-status`
+- **Quyền hạn:** Người dùng trong cùng tổ chức (`organizationId`), hoặc `SUPER_ADMIN`.
+- **Response (HTTP 200 OK):**
+  ```json
+  {
+    "success": true,
+    "data": {
+      "documentId": "11111111-2222-3333-4444-555555555555",
+      "status": "APPROVED",
+      "currentVersion": 1,
+      "isFullySigned": true,
+      "signatures": [
+        {
+          "artifactId": "9f8e7d6c-5b4a-3f2e-1d0c-9b8a7f6e5d4c",
+          "stepOrder": 1,
+          "stepName": "Trưởng phòng xem xét",
+          "signedBy": "Nguyễn Văn A",
+          "isDelegated": false,
+          "signedAt": "2026-10-25T09:30:00.000Z",
+          "certificateSubject": "CN=Nguyễn Văn A, O=Tập đoàn VinaGroup, C=VN",
+          "signedPdfHash": "a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4"
+        }
+      ],
+      "latestSignedPdfUrl": "/api/documents/11111111-2222-3333-4444-555555555555/signed-pdf"
+    }
+  }
+  ```
+
+---
+
+### 10.3. Tải tệp PDF đã ký (Secure Download)
+- **Endpoint:** `GET /api/documents/:id/signed-pdf`
+- **Query Parameters:**
+  - `version` (tùy chọn, mặc định lấy phiên bản ký mới nhất)
+- **Quyền hạn:** Mọi thành viên cùng tổ chức có quyền xem tài liệu, hoặc `SUPER_ADMIN`.
+- **Response Headers:**
+  - `Content-Type: application/pdf`
+  - `Content-Disposition: attachment; filename="Document_001_signed.pdf"`
+  - `X-Signed-Pdf-Hash: a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4`
+  - `Cache-Control: private, no-transform, max-age=3600`
+- **Response Body:** Nhị phân (Binary Stream) của tệp PDF.
+
+---
+
+### 10.4. Xác minh chữ ký số của một tệp PDF (Independent Verification)
+- **Endpoint:** `POST /api/verify/pdf`
+- **Quyền hạn:** Công khai (Public - Không bắt buộc Bearer Token).
+- **Content-Type:** `multipart/form-data`
+- **Form Field:** `file: <binary_pdf>`
+- **Xử lý kỹ thuật:**
+  - Backend phân tích các bảng `/ByteRange` trong tệp PDF.
+  - Tính mã băm SHA-256 trên các byte nhị phân được chỉ định.
+  - Trích xuất chữ ký số CMS từ `/Contents` và giải mã digest bằng khóa công khai của chứng thư số nhúng trong tệp.
+  - Kiểm tra tính nguyên vẹn: So khớp digest tính toán với digest giải mã.
+  - Phân tích chuỗi chứng thư số và thời hạn hiệu lực.
+- **Response Thành công (HTTP 200 OK):**
+  ```json
+  {
+    "success": true,
+    "data": {
+      "fileName": "Document_001_signed.pdf",
+      "fileSizeBytes": 245820,
+      "sha256Hash": "a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4",
+      "signaturesCount": 1,
+      "isTampered": false,
+      "signatures": [
+        {
+          "signatureName": "Signature_Step1",
+          "signerSubject": "CN=Nguyễn Văn A, O=Tập đoàn VinaGroup, C=VN",
+          "issuer": "CN=VinaGroup Internal Root CA, O=VinaGroup",
+          "serialNumber": "5F3A89BC1200E4",
+          "signingTime": "2026-10-25T10:00:00.000Z",
+          "isDigestValid": true,
+          "isCertificateValid": true,
+          "certificateStatus": "ACTIVE",
+          "hasTrustedTimestamp": false,
+          "byteRange": [0, 84320, 100704, 145116]
+        }
+      ],
+      "overallStatus": "VALID"
+    }
+  }
+  ```
+- **Trường hợp tệp bị sửa đổi sau khi ký (Tampered File):**
+  ```json
+  {
+    "success": true,
+    "data": {
+      "fileName": "Document_001_tampered.pdf",
+      "signaturesCount": 1,
+      "isTampered": true,
+      "signatures": [
+        {
+          "signatureName": "Signature_Step1",
+          "isDigestValid": false,
+          "errorMessage": "Mã băm ByteRange không khớp với giá trị giải mã từ chữ ký số. Tệp đã bị can thiệp trái phép sau khi ký."
+        }
+      ],
+      "overallStatus": "TAMPERED"
+    }
+  }
+  ```
+
+---
+
+### 10.5. Tra cứu danh mục chứng thư số theo quyền
+- **Endpoint:** `GET /api/certificates`
+- **Query Parameters:**
+  - `status`: `ACTIVE` | `REVOKED` | `EXPIRED` | `all` (Mặc định `ACTIVE`)
+  - `type`: `PERSONAL` | `ORGANIZATION` | `all`
+- **Quyền hạn:**
+  - `USER`: Chỉ xem các chứng thư cá nhân được gán cho chính mình (`userId === currentUser.id`) trong cùng tổ chức.
+  - `ADMIN`: Xem toàn bộ chứng thư thuộc công ty mình quản lý.
+  - `SUPER_ADMIN`: Xem danh mục chứng thư toàn hệ thống.
+- **Response (HTTP 200 OK):**
+  ```json
+  {
+    "success": true,
+    "data": {
+      "items": [
+        {
+          "id": "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d",
+          "subjectDn": "CN=Nguyễn Văn A, O=Tập đoàn VinaGroup, C=VN",
+          "issuerDn": "CN=VinaGroup Internal Root CA, O=VinaGroup",
+          "serialNumber": "5F3A89BC1200E4",
+          "fingerprintSha256": "4b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c",
+          "validFrom": "2026-01-01T00:00:00.000Z",
+          "validTo": "2027-01-01T00:00:00.000Z",
+          "status": "ACTIVE",
+          "keyStorageType": "DEV_KEYSTORE",
+          "userId": "00000000-0000-0000-0000-000000000001",
+          "userFullName": "Nguyễn Văn A"
+        }
+      ]
+    }
+  }
+  ```

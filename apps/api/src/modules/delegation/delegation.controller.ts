@@ -57,6 +57,7 @@ export class DelegationController {
     @CurrentUser() user: UserPrincipal,
     @Query('isActive') isActiveQuery?: string,
     @Query('role') roleQuery?: 'delegator' | 'delegatee' | 'all',
+    @Query('organizationId') organizationIdQuery?: string,
     @Query('page') pageQuery?: string,
     @Query('limit') limitQuery?: string
   ) {
@@ -74,6 +75,7 @@ export class DelegationController {
       {
         isActive,
         role: roleQuery,
+        organizationId: organizationIdQuery,
         page,
         limit,
       }
