@@ -1,4 +1,6 @@
 import {
+  ArtifactStatus,
+  ArtifactType,
   AssigneeDecision,
   AssigneeRole,
   DocumentStatus,
@@ -145,6 +147,28 @@ export interface UpdateDelegationPolicyDto {
   scopeDepartmentId?: string | null;
   scopeTemplateId?: string | null;
   reason?: string | null;
+}
+
+export interface DocumentArtifactView {
+  id: string;
+  documentId: string;
+  documentVersionId: string;
+  organizationId: string;
+  artifactType: ArtifactType;
+  status: ArtifactStatus;
+  storageKey?: string | null;
+  mimeType: string;
+  sizeBytes?: number | null;
+  rawPdfHash?: string | null;
+  formDataHash: string;
+  signedPdfHash?: string | null;
+  requestedById: string;
+  errorMessage?: string | null;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  downloadUrl?: string;
 }
 
 

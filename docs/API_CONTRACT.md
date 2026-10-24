@@ -1098,11 +1098,123 @@ Khi người dùng gọi `POST /api/documents/:id/decision`:
 
 ---
 
-## 10. CHUẨN API KÝ SỐ MẬT MÃ PDF & XÁC MINH ĐỘC LẬP (PHASE 13)
+## 10. CHUẨN API KẾT XUẤT PDF, LƯU TRỮ ARTIFACT VÀ KÝ SỐ MẬT MÃ (PHASE 13)
 
-Phần này quy định các giao ước API phục vụ việc ký số mật mã (PAdES CMS Detached Signature), quản lý chứng thư X.509, tải tệp PDF đã ký và xác minh tính toàn vẹn độc lập.
+Phần này quy định các giao ước API phục vụ việc kết xuất PDF từ snapshot phiên bản, lưu trữ an toàn đa doanh nghiệp (Phase 13.1), và ký số mật mã PAdES CMS Detached Signature, xác minh tính toàn vẹn độc lập (Phases 13.2 - 13.4).
 
-### 10.1. Khởi tạo yêu cầu ký số tài liệu
+### 10.1. Khởi tạo kết xuất PDF Artifact từ DocumentVersion (Phase 13.1)
+- **Endpoint:** `POST /api/documents/:id/render-pdf`
+- **Mục đích:** Kết xuất tệp PDF A4 chuẩn tiếng Việt từ snapshot dữ liệu biểu mẫu bất biến (`DocumentVersion.formData`) kết hợp định nghĩa biểu mẫu (`FormTemplateVersion.fields`), tính toán mã băm SHA-256 trên byte nhị phân thực tế (`rawPdfHash`) và lưu trữ tệp an toàn ngoài public root.
+- **Quyền hạn (Authorization):**
+  - Người dùng (`USER`, `ADMIN`) thuộc cùng tổ chức (`organizationId`) có quyền xem tài liệu, hoặc `SUPER_ADMIN`.
+  - Chặn `403 FORBIDDEN` nếu truy cập tài liệu thuộc tổ chức khác (Tenant Isolation).
+- **Request Body (JSON):**
+  ```json
+  {
+    "versionNumber": 1,
+    "artifactType": "OFFICIAL_UNSIGNED"
+  }
+  ```
+  *(Các trường đều là tùy chọn. Mặc định `versionNumber` là phiên bản hiện tại của tài liệu; `artifactType` là `PREVIEW` nếu tài liệu đang nháp/xét duyệt, hoặc `OFFICIAL_UNSIGNED` nếu đã `APPROVED`).*
+- **Xử lý tương tranh & Idempotency:**
+  - Sử dụng PostgreSQL Advisory Lock theo `documentId` để tuần tự hóa các yêu cầu kết xuất đồng thời.
+  - Áp dụng unique constraint `[documentId, documentVersionId, artifactType]`. Nếu artifact của phiên bản tương ứng đã ở trạng thái `COMPLETED` và tệp nhị phân còn tồn tại trên đĩa, hệ thống trả về ngay bản ghi có sẵn mà không thực hiện kết xuất lại.
+- **Response Thành công (HTTP 200 OK):**
+  ```json
+  {
+    "success": true,
+    "data": {
+      "id": "d98cb3da-7159-4d2c-8ba2-f2b95624efc7",
+      "documentId": "1ef266c5-1f5d-4c62-8ee0-15ca8ea90110",
+      "documentVersionId": "7a8b9c0d-1e2f-3a4b-5c6d-7e8f9a0b1c2d",
+      "artifactType": "OFFICIAL_UNSIGNED",
+      "status": "COMPLETED",
+      "mimeType": "application/pdf",
+      "sizeBytes": 1099934,
+      "rawPdfHash": "b55737ce744b91ba2806faeaee85a426cc017032d9e352d543e33603f78eb5e4",
+      "formDataHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "processingTimeMs": 284,
+      "createdAt": "2026-10-24T01:46:00.000Z",
+      "downloadUrl": "/api/documents/1ef266c5-1f5d-4c62-8ee0-15ca8ea90110/pdf?version=1&type=OFFICIAL_UNSIGNED"
+    }
+  }
+  ```
+
+---
+
+### 10.2. Tra cứu trạng thái kết xuất PDF Artifact (Phase 13.1)
+- **Endpoint:** `GET /api/documents/:id/render-status`
+- **Query Parameters:**
+  - `versionNumber` (tùy chọn): Phiên bản tài liệu muốn tra cứu (mặc định là phiên bản hiện tại).
+  - `artifactType` (tùy chọn): `PREVIEW` | `OFFICIAL_UNSIGNED`
+- **Quyền hạn:** Cùng tổ chức sở hữu tài liệu, hoặc `SUPER_ADMIN`.
+- **Response Thành công (HTTP 200 OK):**
+  ```json
+  {
+    "success": true,
+    "data": {
+      "documentId": "1ef266c5-1f5d-4c62-8ee0-15ca8ea90110",
+      "versionNumber": 1,
+      "artifact": {
+        "id": "d98cb3da-7159-4d2c-8ba2-f2b95624efc7",
+        "artifactType": "OFFICIAL_UNSIGNED",
+        "status": "COMPLETED",
+        "rawPdfHash": "b55737ce744b91ba2806faeaee85a426cc017032d9e352d543e33603f78eb5e4",
+        "sizeBytes": 1099934,
+        "createdAt": "2026-10-24T01:46:00.000Z"
+      }
+    }
+  }
+  ```
+
+---
+
+### 10.3. Tải tệp PDF nhị phân bảo mật (Secure Download - Phase 13.1)
+- **Endpoint:** `GET /api/documents/:id/pdf`
+- **Query Parameters:**
+  - `versionNumber` (tùy chọn): Phiên bản tài liệu (mặc định lấy phiên bản hiện tại).
+  - `artifactType` (tùy chọn): `PREVIEW` | `OFFICIAL_UNSIGNED`
+- **Quyền hạn:** Thành viên cùng tổ chức sở hữu tài liệu, hoặc `SUPER_ADMIN`.
+- **Response Headers:**
+  - `Content-Type: application/pdf`
+  - `Content-Disposition: inline; filename="TK-2026-1059-619_v1_OFFICIAL_UNSIGNED.pdf"`
+  - `Content-Length: 1099934`
+  - `X-Raw-Pdf-Hash: b55737ce744b91ba2806faeaee85a426cc017032d9e352d543e33603f78eb5e4`
+  - `Cache-Control: private, no-transform, max-age=1800`
+- **Response Body:** Luồng nhị phân (Binary Stream) với magic bytes `%PDF-`.
+
+---
+
+### 10.4. Danh sách các Artifacts của tài liệu (Phase 13.1)
+- **Endpoint:** `GET /api/documents/:id/artifacts`
+- **Quyền hạn:** Thành viên cùng tổ chức sở hữu tài liệu, hoặc `SUPER_ADMIN`.
+- **Response Thành công (HTTP 200 OK):**
+  ```json
+  {
+    "success": true,
+    "data": [
+      {
+        "id": "d98cb3da-7159-4d2c-8ba2-f2b95624efc7",
+        "documentId": "1ef266c5-1f5d-4c62-8ee0-15ca8ea90110",
+        "documentVersionId": "7a8b9c0d-1e2f-3a4b-5c6d-7e8f9a0b1c2d",
+        "versionNumber": 1,
+        "artifactType": "OFFICIAL_UNSIGNED",
+        "status": "COMPLETED",
+        "mimeType": "application/pdf",
+        "sizeBytes": 1099934,
+        "rawPdfHash": "b55737ce744b91ba2806faeaee85a426cc017032d9e352d543e33603f78eb5e4",
+        "formDataHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "processingTimeMs": 284,
+        "createdAt": "2026-10-24T01:46:00.000Z",
+        "downloadUrl": "/api/documents/1ef266c5-1f5d-4c62-8ee0-15ca8ea90110/pdf?version=1&type=OFFICIAL_UNSIGNED"
+      }
+    ]
+  }
+  ```
+
+---
+
+### 10.5. Khởi tạo yêu cầu ký số tài liệu (Phase 13.2 - Kế hoạch)
 - **Endpoint:** `POST /api/documents/:id/sign`
 - **Mục đích:** Thực hiện ký số mật mã PAdES trên tệp PDF của tài liệu.
 - **Quyền hạn (Authorization):**

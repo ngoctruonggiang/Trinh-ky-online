@@ -33,6 +33,7 @@ model Organization {
   templates         FormTemplate[]
   workflowTemplates WorkflowTemplate[]
   delegationPolicies DelegationPolicy[]
+  artifacts         DocumentArtifact[]
 
   @@map("organizations")
 }
@@ -90,6 +91,7 @@ model User {
   reassignmentsAsNew              StepReassignmentHistory[] @relation("ReassignmentNewUser")
   reassignmentsAsActor            StepReassignmentHistory[] @relation("ReassignmentActor")
   notifications                   Notification[]
+  requestedArtifacts              DocumentArtifact[]        @relation("ArtifactRequester")
 
   @@map("users")
 }
@@ -264,6 +266,7 @@ model Document {
   comments          DocumentComment[]
   auditLogs         AuditLog[]
   notifications     Notification[]
+  artifacts         DocumentArtifact[]
 
   @@index([status])
   @@index([createdById])
@@ -289,6 +292,7 @@ model DocumentVersion {
   document       Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
   signatures     SignatureEvent[]
   decisionHistories StepDecisionHistory[]
+  artifacts      DocumentArtifact[]
 
   @@unique([documentId, versionNumber])
   @@map("document_versions")
@@ -601,6 +605,54 @@ model DelegationPolicy {
   @@index([delegateeId, isActive])
   @@index([startDate, endDate])
   @@map("delegation_policies")
+}
+
+// -------------------------------------------------------------
+// 8. TỆP ARTIFACT & KẾT XUẤT PDF (PDF Rendering & Artifact Storage - Phase 13.1)
+// -------------------------------------------------------------
+
+enum ArtifactType {
+  PREVIEW           // PDF xem trước / bản nháp
+  OFFICIAL_UNSIGNED // PDF chính thức chưa ký
+}
+
+enum ArtifactStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+model DocumentArtifact {
+  id                String         @id @default(uuid())
+  documentId        String
+  documentVersionId String
+  organizationId    String
+  artifactType      ArtifactType   @default(OFFICIAL_UNSIGNED)
+  status            ArtifactStatus @default(PENDING)
+  storageKey        String?        // Đường dẫn tương đối / key trong Storage
+  mimeType          String         @default("application/pdf")
+  sizeBytes         Int?           // Dung lượng byte của file PDF thực tế
+  rawPdfHash        String?        // SHA-256 của chính xác các byte PDF được lưu
+  formDataHash      String         // SHA-256 canonical của formData tại documentVersion đó
+  signedPdfHash     String?        // NULL trong Phase 13.1, dành riêng cho Phase 13.2+ khi ký số thực sự
+  requestedById     String
+  errorMessage      String?
+  startedAt         DateTime?
+  completedAt       DateTime?
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+
+  document          Document        @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  documentVersion   DocumentVersion @relation(fields: [documentVersionId], references: [id], onDelete: Cascade)
+  organization      Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  requestedBy       User            @relation("ArtifactRequester", fields: [requestedById], references: [id])
+
+  @@unique([documentVersionId, artifactType])
+  @@index([documentId, status])
+  @@index([organizationId])
+  @@index([rawPdfHash])
+  @@map("document_artifacts")
 }
 
 

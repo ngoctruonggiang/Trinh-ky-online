@@ -1,7 +1,7 @@
 # KẾ HOẠCH TRIỂN KHAI HỆ THỐNG KÝ SỐ MẬT MÃ PDF (PHASES 13.1 — 13.4)
 *Dự án: Trình Ký Online Nội Bộ Doanh Nghiệp / Tập Đoàn*  
-*Giai đoạn: Phase 13.0 — Roadmap, Schema Migrations, API Contracts & Testing Gates*  
-*Trạng thái: SẴN SÀNG KÍCH HOẠT (READY FOR IMPLEMENTATION UPON APPROVAL)*
+*Giai đoạn: Phase 13.1 — PDF Rendering Engine & Secure Artifact Storage*  
+*Trạng thái: PHASE 13.1 COMPLETED — SẴN SÀNG KÍCH HOẠT PHASE 13.2*
 
 ---
 
@@ -12,18 +12,18 @@ gantt
     title Lộ trình Kỹ thuật Ký số Mật mã PDF (Phase 13.1 - 13.4)
     dateFormat  YYYY-MM-DD
     section Phase 13.1
-    PDF Rendering Engine & Storage Service        :p131, 2026-10-25, 4d
+    PDF Rendering Engine & Storage Service        :done, p131, 2026-10-24, 1d
     section Phase 13.2
-    Cryptographic Signing Engine & Dev Keystore  :p132, after p131, 5d
+    Cryptographic Signing Engine & Dev Keystore  :active, p132, 2026-10-25, 5d
     section Phase 13.3
     Workflow Integration, Delegation & Audit     :p133, after p132, 4d
     section Phase 13.4
     Independent Verification & Security Gates    :p134, after p133, 4d
 ```
 
-| Giai đoạn | Tên nhiệm vụ chính | Trọng tâm bàn giao kỹ thuật | Tiêu chí hoàn thành cốt lõi (Definition of Done) |
-| :--- | :--- | :--- | :--- |
-| **Phase 13.1** | **PDF Rendering Engine & Artifact Storage Service** | 1. Xây dựng dịch vụ kết xuất PDF bất biến từ form snapshot.<br/>2. Xây dựng module lưu trữ `StorageService` với tenant isolation.<br/>3. Tạo bảng lưu trữ nhị phân và mã băm SHA-256. | - Sinh được PDF A4 chuẩn tiếng Việt từ `DocumentVersion`.<br/>- Tính và lưu đúng `rawPdfHash` khớp nhị phân 100%.<br/>- API tải file có phân quyền tenant. |
+| Giai đoạn | Tên nhiệm vụ chính | Trọng tâm bàn giao kỹ thuật | Tiêu chí hoàn thành cốt lõi (Definition of Done) | Trạng thái |
+| :--- | :--- | :--- | :--- | :--- |
+| **Phase 13.1** | **PDF Rendering Engine & Artifact Storage Service** | 1. Xây dựng dịch vụ kết xuất PDF bất biến từ form snapshot.<br/>2. Xây dựng module lưu trữ `StorageService` với tenant isolation.<br/>3. Tạo bảng lưu trữ nhị phân và mã băm SHA-256. | - Sinh được PDF A4 chuẩn tiếng Việt từ `DocumentVersion`.<br/>- Tính và lưu đúng `rawPdfHash` khớp nhị phân 100%.<br/>- API tải file có phân quyền tenant. | **HOÀN THÀNH (100% Tests Pass)** |
 | **Phase 13.2** | **Cryptographic Signing Engine & Dev Keystore** | 1. Tích hợp `pdf-lib` + `@node-signpdf` + `@peculiar/x509`.<br/>2. Triển khai `DevLocalKeystoreProvider` (PKCS#12 AES-256).<br/>3. Thực hiện chèn ByteRange và CMS detached signature. | - Ký thành công chữ ký số PAdES B-B trên tệp PDF.<br/>- Adobe Acrobat Reader nhận diện chữ ký hợp lệ.<br/>- Không rò rỉ khóa riêng ra ngoài RAM. |
 | **Phase 13.3** | **Workflow Integration, Multi-Signer & Delegation** | 1. Tích hợp ký số vào `WorkflowOrchestrator` và FSM.<br/>2. Hỗ trợ Incremental Updates cho quy trình nhiều người ký.<br/>3. Liên kết chứng thư người ký thực tế với chính sách ủy quyền. | - Phê duyệt bước sinh đúng chữ ký số tương ứng.<br/>- Chữ ký sau không làm hỏng chữ ký trước.<br/>- Bản ghi audit liên kết `actualActor` + `delegator` + `certId`. |
 | **Phase 13.4** | **Independent Verification, CLI Verifier & Security Gates** | 1. Xây dựng API và CLI kiểm tra tính toàn vẹn độc lập.<br/>2. Kiểm thử tấn công sửa đổi byte, replay, cross-tenant.<br/>3. Đạt 100% kiểm thử hồi quy và Live HTTP E2E tests. | - Phát hiện 100% tệp PDF bị sửa đổi sau ký.<br/>- Độc lập xác minh bằng OpenSSL và Adobe Reader.<br/>- Bộ test tự động PASS toàn diện. |

@@ -95,6 +95,7 @@ export enum AuditAction {
   CREATE_DELEGATION_POLICY = 'CREATE_DELEGATION_POLICY',
   UPDATE_DELEGATION_POLICY = 'UPDATE_DELEGATION_POLICY',
   REVOKE_DELEGATION_POLICY = 'REVOKE_DELEGATION_POLICY',
+  RENDER_PDF = 'RENDER_PDF',
 }
 
 export enum NotificationType {
@@ -109,10 +110,21 @@ export enum NotificationType {
   DELEGATION_REVOKED = 'DELEGATION_REVOKED',
 }
 
-
 export enum NotificationStatus {
   PENDING = 'PENDING',
   SENT = 'SENT',
+  FAILED = 'FAILED',
+}
+
+export enum ArtifactType {
+  PREVIEW = 'PREVIEW',
+  OFFICIAL_UNSIGNED = 'OFFICIAL_UNSIGNED',
+}
+
+export enum ArtifactStatus {
+  PENDING = 'PENDING',
+  PROCESSING = 'PROCESSING',
+  COMPLETED = 'COMPLETED',
   FAILED = 'FAILED',
 }
 

@@ -1,4 +1,5 @@
 import { PrismaClient } from '@prisma/client';
+import * as crypto from 'crypto';
 import { JwtUtil } from '../src/common/utils/jwt.util.js';
 import { UserRole } from '@trinh-ky/shared';
 
@@ -1342,13 +1343,154 @@ async function runLiveTests() {
   }
   console.log('   -> PASS (Backend chặn triệt để tham số organizationId do client gửi, bảo đảm 100% Tenant Isolation)\n');
 
+  // =========================================================================
+  // PHASE 13.1: PDF RENDERING ENGINE & SECURE ARTIFACT STORAGE LIVE TESTS
+  // =========================================================================
+
+  // Test 53: POST /api/documents/:id/render-pdf (User A kết xuất PDF cho hồ sơ Alpha) -> 200 OK
+  console.log('53. Test POST /api/documents/:id/render-pdf (Kết xuất PDF artifact thành công):');
+  const resRender = await fetch(`${API_BASE}/documents/${createdDocWithWf.id}/render-pdf`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenUserA}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      versionNumber: 1,
+      artifactType: 'OFFICIAL_UNSIGNED',
+    }),
+  });
+  const bodyRender = await resRender.json();
+  const createdArtifact = bodyRender.data;
+  console.log(`   HTTP Status: ${resRender.status} | Status: ${createdArtifact?.status} | Hash: ${createdArtifact?.rawPdfHash?.slice(0, 16)}...`);
+  if (resRender.status !== 200 || createdArtifact?.status !== 'COMPLETED' || !createdArtifact?.rawPdfHash) {
+    throw new Error(`Test 53 thất bại: Kết xuất PDF artifact không thành công: ${JSON.stringify(bodyRender)}`);
+  }
+  console.log('   -> PASS (Tạo và lưu trữ PDF artifact thành công, trạng thái COMPLETED)\n');
+
+  // Test 54: GET /api/documents/:id/render-status (Tra cứu trạng thái tệp artifact) -> 200 OK
+  console.log('54. Test GET /api/documents/:id/render-status (Tra cứu trạng thái artifact):');
+  const resRenderStatus = await fetch(
+    `${API_BASE}/documents/${createdDocWithWf.id}/render-status?type=OFFICIAL_UNSIGNED&version=1`,
+    {
+      headers: { Authorization: `Bearer ${tokenUserA}` },
+    }
+  );
+  const bodyRenderStatus = await resRenderStatus.json();
+  console.log(`   HTTP Status: ${resRenderStatus.status} | ArtifactId: ${bodyRenderStatus.data?.id} | Status: ${bodyRenderStatus.data?.status}`);
+  if (resRenderStatus.status !== 200 || bodyRenderStatus.data?.id !== createdArtifact.id) {
+    throw new Error('Test 54 thất bại: Tra cứu trạng thái artifact không khớp');
+  }
+  console.log('   -> PASS (Tra cứu trạng thái artifact chính xác)\n');
+
+  // Test 55: GET /api/documents/:id/pdf (Tải luồng nhị phân PDF thật qua HTTP) -> 200 OK
+  console.log('55. Test GET /api/documents/:id/pdf (Tải tệp PDF nhị phân qua HTTP):');
+  const resDownloadPdf = await fetch(
+    `${API_BASE}/documents/${createdDocWithWf.id}/pdf?type=OFFICIAL_UNSIGNED&version=1`,
+    {
+      headers: { Authorization: `Bearer ${tokenUserA}` },
+    }
+  );
+  const contentType = resDownloadPdf.headers.get('content-type');
+  const headerPdfHash = resDownloadPdf.headers.get('x-raw-pdf-hash');
+  const pdfArrayBuffer = await resDownloadPdf.arrayBuffer();
+  const downloadedBuffer = Buffer.from(pdfArrayBuffer);
+  const magicBytes = downloadedBuffer.subarray(0, 5).toString('ascii');
+
+  console.log(`   HTTP Status: ${resDownloadPdf.status} | Content-Type: ${contentType} | Size: ${downloadedBuffer.length} bytes | Magic: ${magicBytes}`);
+  if (resDownloadPdf.status !== 200 || contentType !== 'application/pdf' || magicBytes !== '%PDF-') {
+    throw new Error('Test 55 thất bại: File tải về không phải PDF hợp lệ hoặc Content-Type sai');
+  }
+  console.log('   -> PASS (Tải luồng nhị phân PDF thành công với Magic Bytes %PDF- hợp lệ)\n');
+
+  // Test 56: Đối soát toàn vẹn băm nhị phân: SHA-256 từ byte tải về phải trùng khớp tuyệt đối với rawPdfHash
+  console.log('56. Test Đối soát Toàn vẹn Nhị phân (Binary Hash Integrity Verification):');
+  const computedDownloadHash = crypto.createHash('sha256').update(downloadedBuffer).digest('hex');
+  console.log(`   Hash từ API:   ${headerPdfHash}`);
+  console.log(`   Hash tính lại:  ${computedDownloadHash}`);
+  if (computedDownloadHash !== headerPdfHash || computedDownloadHash !== createdArtifact.rawPdfHash) {
+    throw new Error('Test 56 thất bại: Mã băm SHA-256 của file tải về không khớp với rawPdfHash trong CSDL!');
+  }
+  console.log('   -> PASS (Mã băm SHA-256 của file tải về khớp 100% với dữ liệu kiểm toán CSDL)\n');
+
+  // Test 57: Bảo mật Đa doanh nghiệp (Tenant Isolation): User B (Công ty Beta) bị chặn 403 khi tải PDF của Alpha
+  console.log('57. Test Tenant Isolation trên API Artifacts: User B (Beta) cố tình truy cập PDF của Alpha:');
+  const resCrossRender = await fetch(`${API_BASE}/documents/${createdDocWithWf.id}/render-pdf`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenUserB}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ versionNumber: 1 }),
+  });
+  const resCrossDownload = await fetch(
+    `${API_BASE}/documents/${createdDocWithWf.id}/pdf?type=OFFICIAL_UNSIGNED&version=1`,
+    {
+      headers: { Authorization: `Bearer ${tokenUserB}` },
+    }
+  );
+  console.log(`   Cross Render Status: ${resCrossRender.status} | Cross Download Status: ${resCrossDownload.status}`);
+  if (resCrossRender.status !== 403 || resCrossDownload.status !== 403) {
+    throw new Error('Test 57 thất bại: Không chặn 403 khi người dùng công ty khác truy cập PDF');
+  }
+  console.log('   -> PASS (Chặn truy cập trái phép đa doanh nghiệp trên PDF artifacts thành công với 403 Forbidden)\n');
+
+  // Test 58: Chặn yêu cầu kết xuất cho phiên bản không tồn tại -> 404 NOT FOUND
+  console.log('58. Test yêu cầu kết xuất PDF cho phiên bản không tồn tại (Chặn 404):');
+  const resInvalidVer = await fetch(`${API_BASE}/documents/${createdDocWithWf.id}/render-pdf`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenUserA}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ versionNumber: 999 }),
+  });
+  console.log(`   HTTP Status: ${resInvalidVer.status}`);
+  if (resInvalidVer.status !== 404) {
+    throw new Error(`Test 58 thất bại: Kỳ vọng 404 NOT_FOUND nhưng nhận ${resInvalidVer.status}`);
+  }
+  console.log('   -> PASS (Chuẩn hóa lỗi 404 khi phiên bản không tồn tại)\n');
+
+  // Test 59: Tính Idempotency trên Live HTTP: Gọi lại POST /render-pdf lần 2 nhận ngay artifact cũ
+  console.log('59. Test tính Idempotency trên Live HTTP: Gọi render lần 2 nhận ngay artifact COMPLETED:');
+  const resRenderAgain = await fetch(`${API_BASE}/documents/${createdDocWithWf.id}/render-pdf`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenUserA}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      versionNumber: 1,
+      artifactType: 'OFFICIAL_UNSIGNED',
+    }),
+  });
+  const bodyRenderAgain = await resRenderAgain.json();
+  console.log(`   HTTP Status: ${resRenderAgain.status} | ArtifactId: ${bodyRenderAgain.data?.id}`);
+  if (resRenderAgain.status !== 200 || bodyRenderAgain.data?.id !== createdArtifact.id) {
+    throw new Error('Test 59 thất bại: Không trả về artifact cũ khi gọi lại lần 2');
+  }
+  console.log('   -> PASS (Hệ thống xử lý Idempotent hoàn hảo, không sinh file trùng lặp)\n');
+
+  // Test 60: GET /api/documents/:id/artifacts (Lấy danh sách artifacts của hồ sơ) -> 200 OK
+  console.log('60. Test GET /api/documents/:id/artifacts (Liệt kê danh sách artifacts của tài liệu):');
+  const resListArt = await fetch(`${API_BASE}/documents/${createdDocWithWf.id}/artifacts`, {
+    headers: { Authorization: `Bearer ${tokenUserA}` },
+  });
+  const bodyListArt = await resListArt.json();
+  console.log(`   HTTP Status: ${resListArt.status} | Total Artifacts: ${bodyListArt.data?.length}`);
+  if (resListArt.status !== 200 || !Array.isArray(bodyListArt.data) || bodyListArt.data.length === 0) {
+    throw new Error('Test 60 thất bại: Không lấy được danh sách artifacts của hồ sơ');
+  }
+  console.log('   -> PASS (Tra cứu danh sách artifacts thành công)\n');
+
   await prisma.$disconnect();
   console.log('========================================================================');
-  console.log('🎉 TẤT CẢ 52/52 KỊCH BẢN KIỂM THỬ LIVE HTTP & SECURITY TRÊN POSTGRESQL');
-  console.log('   (BAO GỒM REASSIGNMENT, SLA SCHEDULER, NOTIFICATION & DELEGATION SECURITY/CONCURRENCY AUDIT)');
+  console.log('🎉 TẤT CẢ 60/60 KỊCH BẢN KIỂM THỬ LIVE HTTP & SECURITY TRÊN POSTGRESQL');
+  console.log('   (BAO GỒM REASSIGNMENT, SLA SCHEDULER, NOTIFICATION, DELEGATION VÀ PHASE 13.1 PDF ARTIFACT STORAGE)');
   console.log('   ĐÃ PASS 100%!');
   console.log('========================================================================');
 }
+
 
 
 runLiveTests().catch((err) => {
