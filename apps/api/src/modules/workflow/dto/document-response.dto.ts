@@ -86,6 +86,10 @@ export interface DecisionHistoryViewDto {
   decision: AssigneeDecision;
   decisionComment?: string;
   decidedAt: string;
+  isDelegated?: boolean;
+  delegatedFromUserId?: string;
+  delegatedFromUserName?: string;
+  delegationPolicyId?: string;
 }
 
 export interface SignatureViewDto {
@@ -121,6 +125,8 @@ export interface DocumentPermissionsDto {
   isCreator: boolean;
   isAdmin: boolean;
   currentStepAssigneeRole?: AssigneeRole;
+  isDelegatedApproval?: boolean;
+  delegatedFromUserName?: string;
 }
 
 export interface DocumentDetailDto extends DocumentListItemDto {

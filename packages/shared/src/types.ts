@@ -105,3 +105,46 @@ export interface CancelWorkflowParams {
   nowISO?: string;
 }
 
+export interface DelegationPolicyView {
+  id: string;
+  organizationId: string;
+  delegatorId: string;
+  delegatorName?: string;
+  delegatorEmail?: string;
+  delegateeId: string;
+  delegateeName?: string;
+  delegateeEmail?: string;
+  startDate: string;
+  endDate: string;
+  scopeDepartmentId?: string | null;
+  scopeDepartmentName?: string | null;
+  scopeTemplateId?: string | null;
+  scopeTemplateTitle?: string | null;
+  reason?: string | null;
+  isActive: boolean;
+  createdById: string;
+  createdByName?: string;
+  revokedAt?: string | null;
+  revokedById?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateDelegationPolicyDto {
+  delegatorId?: string; // Tùy chọn nếu người dùng tự ủy quyền, bắt buộc nếu Admin tạo
+  delegateeId: string;
+  startDate: string; // ISO string
+  endDate: string; // ISO string
+  scopeDepartmentId?: string | null;
+  scopeTemplateId?: string | null;
+  reason?: string | null;
+}
+
+export interface UpdateDelegationPolicyDto {
+  endDate?: string;
+  scopeDepartmentId?: string | null;
+  scopeTemplateId?: string | null;
+  reason?: string | null;
+}
+
+

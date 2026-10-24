@@ -26,6 +26,7 @@ import {
   WorkflowAssignee,
   SignatureRecord,
 } from '@trinh-ky/shared';
+import { DelegationService } from '../delegation/delegation.service.js';
 
 export interface CreateDocumentInput {
   templateId: string;
@@ -90,7 +91,10 @@ export interface ReassignApproverInput {
 }
 
 export class WorkflowOrchestratorService {
-  constructor(private readonly prisma: PrismaClient) {}
+  constructor(
+    private readonly prisma: PrismaClient,
+    private readonly delegationService?: DelegationService
+  ) {}
 
   /**
    * Helper: Chuyển đổi dữ liệu Prisma Workflow sang định dạng Domain WorkflowInstance của FSM
@@ -362,9 +366,46 @@ export class WorkflowOrchestratorService {
         );
       }
 
-      const assignee = currentStep.assignees.find((a) => a.userId === userId);
+      let assignee = currentStep.assignees.find((a) => a.userId === userId);
+      let isDelegated = false;
+      let delegatedFromUserId: string | null = null;
+      let delegationPolicyId: string | null = null;
+      let delegatorName: string | null = null;
+
       if (!assignee) {
-        throw new ForbiddenException(`Người dùng ${userId} không được phân công trong bước "${currentStep.stepName}"`);
+        // Nếu actor không được phân công trực tiếp, kiểm tra Delegation Policy Engine
+        if (this.delegationService) {
+          const delegationResolution = await this.delegationService.resolveActiveDelegation({
+            document: {
+              id: document.id,
+              organizationId: document.organizationId,
+              departmentId: document.departmentId,
+              templateId: document.templateId,
+              title: document.title,
+            },
+            step: {
+              id: currentStep.id,
+              stepName: currentStep.stepName,
+              assignees: currentStep.assignees as any,
+            },
+            actorId: userId,
+            now,
+          });
+
+          if (delegationResolution) {
+            assignee = delegationResolution.assignee as any;
+            isDelegated = true;
+            delegatedFromUserId = delegationResolution.policy.delegatorId;
+            delegationPolicyId = delegationResolution.policy.id;
+            delegatorName = delegationResolution.delegatorName;
+          }
+        }
+
+        if (!assignee) {
+          throw new ForbiddenException(
+            `Người dùng ${userId} không được phân công trong bước "${currentStep.stepName}" (không có ủy quyền hợp lệ)`
+          );
+        }
       }
 
       if (assignee.user && !assignee.user.isActive) {
@@ -414,11 +455,11 @@ export class WorkflowOrchestratorService {
         invalidatedAt: sig.invalidatedAt ? sig.invalidatedAt.toISOString() : undefined,
       }));
 
-      // Chạy FSM
+      // Chạy FSM với người giữ vị trí phê duyệt (assignee.userId)
       const fsmResult = WorkflowFSM.processDecision({
         workflow: domainWorkflow,
         documentStatus: document.status as DocumentStatus,
-        userId,
+        userId: assignee.userId,
         decision,
         decisionComment,
         existingSignatures,
@@ -429,16 +470,19 @@ export class WorkflowOrchestratorService {
         throw new Error(fsmResult.error || 'Quyết định phê duyệt không hợp lệ theo quy tắc FSM.');
       }
 
-      // 4. Lưu lịch sử quyết định bất biến (StepDecisionHistory) gắn chặt với documentVersionId
+      // 4. Lưu lịch sử quyết định bất biến (StepDecisionHistory) gắn chặt với documentVersionId và attribution ủy quyền
       await tx.stepDecisionHistory.create({
         data: {
           stepId: currentStep.id,
           documentVersionId: activeVersion.id,
-          userId,
+          userId, // Actual actor (người thực sự bấm duyệt)
           role: assignee.role,
           decision,
           decisionComment,
           decidedAt: now,
+          isDelegated,
+          delegatedFromUserId,
+          delegationPolicyId,
         },
       });
 
@@ -693,10 +737,43 @@ export class WorkflowOrchestratorService {
             versionNumber: activeVersion.versionNumber,
             documentStatus: fsmResult.newDocumentStatus,
             workflowStatus: fsmResult.newWorkflowStatus,
+            isDelegated,
+            ...(isDelegated
+              ? {
+                  delegatorId: delegatedFromUserId,
+                  delegatorName,
+                  delegationPolicyId,
+                }
+              : {}),
           },
           ipAddress,
         },
       });
+
+      // Nếu là quyết định ủy quyền, gửi thông báo cho người ủy quyền biết
+      if (isDelegated && delegatedFromUserId && typeof (tx as any).notification?.create === 'function') {
+        const actorUser = await tx.user.findUnique({
+          where: { id: userId },
+          select: { fullName: true },
+        });
+        const actorName = actorUser?.fullName || userId;
+        await (tx as any).notification.create({
+          data: {
+            userId: delegatedFromUserId,
+            documentId: document.id,
+            type: 'ASSIGNED_STEP',
+            title: 'Hồ sơ đã được xử lý theo ủy quyền',
+            content: `Cán bộ ${actorName} đã thay mặt bạn thực hiện quyết định "${decision}" trên bước "${currentStep.stepName}".`,
+            metadata: {
+              stepId: currentStep.id,
+              stepName: currentStep.stepName,
+              delegationPolicyId,
+              actualActorId: userId,
+              decision,
+            },
+          },
+        });
+      }
 
       return {
         success: true,

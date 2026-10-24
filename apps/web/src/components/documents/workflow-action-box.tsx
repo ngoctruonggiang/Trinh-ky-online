@@ -10,6 +10,7 @@ import {
   FileCheck2,
   RefreshCw,
   UserCheck,
+  ShieldAlert,
 } from 'lucide-react';
 import {
   DocumentDetail,
@@ -182,6 +183,17 @@ export function WorkflowActionBox({
         <FileCheck2 className="w-4 h-4 text-blue-600" />
         Thao tác trên hồ sơ
       </h3>
+
+      {/* Thông báo quyền phê duyệt ủy quyền */}
+      {permissions.isDelegatedApproval && (
+        <div className="mb-4 rounded-lg p-3 text-xs bg-amber-50 text-amber-900 border border-amber-200 flex items-center gap-2">
+          <ShieldAlert className="w-4 h-4 text-amber-600 shrink-0" />
+          <span>
+            Bạn đang thao tác với tư cách <strong>người được ủy quyền</strong> thay mặt cho{' '}
+            <strong>{permissions.delegatedFromUserName || 'người phê duyệt'}</strong> theo chính sách ủy quyền còn hiệu lực.
+          </span>
+        </div>
+      )}
 
       {/* Thông báo lỗi xung đột hoặc lỗi mạng nếu có */}
       {errorMessage && (

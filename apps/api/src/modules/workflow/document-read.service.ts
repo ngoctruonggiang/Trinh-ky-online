@@ -47,6 +47,27 @@ export class DocumentReadService {
 
     // 2. Chế độ danh sách (Tab Mode)
     if (query.tab === 'pending_my_approval') {
+      const now = new Date();
+      // Tìm các delegatorId mà user.id đang được ủy quyền hợp lệ
+      const activeDelegations =
+        typeof (this.prisma as any).delegationPolicy?.findMany === 'function'
+          ? await (this.prisma as any).delegationPolicy.findMany({
+              where: {
+                delegateeId: user.id,
+                isActive: true,
+                startDate: { lte: now },
+                endDate: { gte: now },
+                ...(user.organizationId ? { organizationId: user.organizationId } : {}),
+              },
+              select: { delegatorId: true },
+            })
+          : [];
+      const validDelegatorIds = activeDelegations.map((d: any) => d.delegatorId);
+      const eligibleAssigneeFilter =
+        validDelegatorIds.length > 0
+          ? { in: [user.id, ...validDelegatorIds] }
+          : user.id;
+
       where.status = DocumentStatus.IN_REVIEW;
       where.workflow = {
         status: WorkflowStatus.RUNNING,
@@ -55,7 +76,7 @@ export class DocumentReadService {
             status: StepStatus.IN_PROGRESS,
             assignees: {
               some: {
-                userId: user.id,
+                userId: eligibleAssigneeFilter,
                 role: AssigneeRole.APPROVER,
                 decision: AssigneeDecision.PENDING,
               },
@@ -242,6 +263,7 @@ export class DocumentReadService {
         include: {
           step: { select: { stepOrder: true, stepName: true } },
           user: { select: { id: true, fullName: true } },
+          delegatedFromUser: { select: { id: true, fullName: true } },
         },
         orderBy: { decidedAt: 'asc' },
       }),
@@ -321,6 +343,65 @@ export class DocumentReadService {
       (currentAssignee?.role as unknown as AssigneeRole) === AssigneeRole.APPROVER &&
       (currentAssignee?.decision as unknown as AssigneeDecision) === AssigneeDecision.PENDING;
 
+    // Kiểm tra quyền duyệt ủy quyền (Delegation Policy Resolution)
+    let isDelegateeCanApprove = false;
+    let delegatedFromUserName: string | undefined = undefined;
+
+    if (
+      !canApprove &&
+      (doc.status as unknown as DocumentStatus) === DocumentStatus.IN_REVIEW &&
+      currentStep?.status === StepStatus.IN_PROGRESS
+    ) {
+      const pendingApproverIds = (currentStep.assignees || [])
+        .filter(
+          (a: any) =>
+            (a.role as unknown as AssigneeRole) === AssigneeRole.APPROVER &&
+            (a.decision as unknown as AssigneeDecision) === AssigneeDecision.PENDING
+        )
+        .map((a: any) => a.userId);
+
+      if (pendingApproverIds.length > 0) {
+        const now = new Date();
+        const activePolicy =
+          typeof (this.prisma as any).delegationPolicy?.findFirst === 'function'
+            ? await (this.prisma as any).delegationPolicy.findFirst({
+                where: {
+                  delegatorId: { in: pendingApproverIds },
+                  delegateeId: user.id,
+                  isActive: true,
+                  startDate: { lte: now },
+                  endDate: { gte: now },
+                  ...(doc.organizationId ? { organizationId: doc.organizationId } : {}),
+                  delegatee: { isActive: true },
+                  delegator: { isActive: true },
+                  AND: [
+                    {
+                      OR: [
+                        { scopeTemplateId: null },
+                        { scopeTemplateId: doc.templateId },
+                      ],
+                    },
+                    {
+                      OR: [
+                        { scopeDepartmentId: null },
+                        { scopeDepartmentId: doc.departmentId },
+                      ],
+                    },
+                  ],
+                },
+                include: {
+                  delegator: { select: { fullName: true } },
+                },
+              })
+            : null;
+
+        if (activePolicy) {
+          isDelegateeCanApprove = true;
+          delegatedFromUserName = activePolicy.delegator.fullName;
+        }
+      }
+    }
+
     const canResubmit =
       (doc.status as unknown as DocumentStatus) === DocumentStatus.REVISION_REQUESTED &&
       (isCreator || isAdmin);
@@ -392,6 +473,10 @@ export class DocumentReadService {
       decisionComment: h.decisionComment ?? undefined,
       decidedAt:
         h.decidedAt instanceof Date ? h.decidedAt.toISOString() : h.decidedAt,
+      isDelegated: Boolean(h.isDelegated),
+      delegatedFromUserId: h.delegatedFromUserId ?? undefined,
+      delegatedFromUserName: h.delegatedFromUser?.fullName ?? undefined,
+      delegationPolicyId: h.delegationPolicyId ?? undefined,
     }));
 
     // 5. Map reassignment histories
@@ -478,13 +563,15 @@ export class DocumentReadService {
       reassignmentHistories: mappedReassignments,
       signatures,
       permissions: {
-        canApprove: Boolean(canApprove),
+        canApprove: Boolean(canApprove || isDelegateeCanApprove),
         canResubmit: Boolean(canResubmit),
         canCancel: Boolean(canCancel),
         canReassign: Boolean(canReassign),
         isCreator,
         isAdmin,
         currentStepAssigneeRole: currentAssignee?.role as unknown as AssigneeRole | undefined,
+        isDelegatedApproval: Boolean(isDelegateeCanApprove),
+        delegatedFromUserName,
       },
     };
   }

@@ -32,6 +32,7 @@ model Organization {
   documents         Document[]
   templates         FormTemplate[]
   workflowTemplates WorkflowTemplate[]
+  delegationPolicies DelegationPolicy[]
 
   @@map("organizations")
 }
@@ -47,6 +48,7 @@ model Department {
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   users          User[]
   documents      Document[]
+  delegationPolicies DelegationPolicy[]
 
   @@unique([organizationId, code])
   @@map("departments")
@@ -78,7 +80,12 @@ model User {
   signatures                      SignatureEvent[]
   comments                        DocumentComment[]
   auditLogs                       AuditLog[]
-  decisionHistories               StepDecisionHistory[]
+  decisionHistories               StepDecisionHistory[] @relation("DecisionActor")
+  delegatedDecisionsAsDelegator   StepDecisionHistory[] @relation("DecisionDelegator")
+  delegationsAsDelegator          DelegationPolicy[]    @relation("DelegationsAsDelegator")
+  delegationsAsDelegatee          DelegationPolicy[]    @relation("DelegationsAsDelegatee")
+  delegationsCreated              DelegationPolicy[]    @relation("DelegationCreator")
+  delegationsRevoked              DelegationPolicy[]    @relation("DelegationRevoker")
   reassignmentsAsOld              StepReassignmentHistory[] @relation("ReassignmentOldUser")
   reassignmentsAsNew              StepReassignmentHistory[] @relation("ReassignmentNewUser")
   reassignmentsAsActor            StepReassignmentHistory[] @relation("ReassignmentActor")
@@ -124,6 +131,7 @@ model FormTemplate {
   workflowTemplate     WorkflowTemplate? @relation(fields: [workflowTemplateId], references: [id], onDelete: SetNull)
   versions             FormTemplateVersion[]
   documents            Document[]
+  delegationPolicies   DelegationPolicy[]
 
   @@map("form_templates")
 }
@@ -410,21 +418,27 @@ model StepAssignee {
 }
 
 model StepDecisionHistory {
-  id                String           @id @default(uuid())
-  stepId            String
-  documentVersionId String
-  userId            String
-  role              AssigneeRole
-  decision          AssigneeDecision
-  decisionComment   String?
-  decidedAt         DateTime         @default(now())
+  id                  String           @id @default(uuid())
+  stepId              String
+  documentVersionId   String
+  userId              String
+  role                AssigneeRole
+  decision            AssigneeDecision
+  decisionComment     String?
+  decidedAt           DateTime         @default(now())
+  isDelegated         Boolean          @default(false)
+  delegatedFromUserId String?
+  delegationPolicyId  String?
 
-  step              ApprovalStep     @relation(fields: [stepId], references: [id], onDelete: Cascade)
-  documentVersion   DocumentVersion  @relation(fields: [documentVersionId], references: [id], onDelete: Cascade)
-  user              User             @relation(fields: [userId], references: [id])
+  step                ApprovalStep     @relation(fields: [stepId], references: [id], onDelete: Cascade)
+  documentVersion     DocumentVersion  @relation(fields: [documentVersionId], references: [id], onDelete: Cascade)
+  user                User             @relation("DecisionActor", fields: [userId], references: [id])
+  delegatedFromUser   User?            @relation("DecisionDelegator", fields: [delegatedFromUserId], references: [id])
+  delegationPolicy    DelegationPolicy? @relation(fields: [delegationPolicyId], references: [id], onDelete: SetNull)
 
   @@index([stepId])
   @@index([documentVersionId])
+  @@index([delegatedFromUserId])
   @@map("step_decision_histories")
 }
 
@@ -517,6 +531,8 @@ enum NotificationType {
   DOCUMENT_REJECTED
   SLA_WARNING
   SLA_OVERDUE
+  DELEGATION_ASSIGNED
+  DELEGATION_REVOKED
 }
 
 enum NotificationStatus {
@@ -549,4 +565,42 @@ model Notification {
   @@index([status])
   @@map("notifications")
 }
+
+// -------------------------------------------------------------
+// 7. CHÍNH SÁCH ỦY QUYỀN DUYỆT (Delegation Policy Engine - Phase 12.1)
+// -------------------------------------------------------------
+
+model DelegationPolicy {
+  id                String       @id @default(uuid())
+  organizationId    String
+  delegatorId       String
+  delegateeId       String
+  startDate         DateTime
+  endDate           DateTime
+  scopeDepartmentId String?
+  scopeTemplateId   String?
+  reason            String?
+  isActive          Boolean      @default(true)
+  createdById       String
+  revokedAt         DateTime?
+  revokedById       String?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  organization      Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  delegator         User         @relation("DelegationsAsDelegator", fields: [delegatorId], references: [id])
+  delegatee         User         @relation("DelegationsAsDelegatee", fields: [delegateeId], references: [id])
+  createdBy         User         @relation("DelegationCreator", fields: [createdById], references: [id])
+  revokedBy         User?        @relation("DelegationRevoker", fields: [revokedById], references: [id])
+  scopeDepartment   Department?  @relation(fields: [scopeDepartmentId], references: [id], onDelete: SetNull)
+  scopeTemplate     FormTemplate? @relation(fields: [scopeTemplateId], references: [id], onDelete: SetNull)
+  decisionHistories StepDecisionHistory[]
+
+  @@index([organizationId])
+  @@index([delegatorId, isActive])
+  @@index([delegateeId, isActive])
+  @@index([startDate, endDate])
+  @@map("delegation_policies")
+}
+
 

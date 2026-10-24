@@ -6,9 +6,11 @@ import { DocumentReadService } from './document-read.service.js';
 import { SlaSchedulerService } from './sla-scheduler.service.js';
 import { SlaSchedulerController } from './sla-scheduler.controller.js';
 import { NotificationModule } from '../notification/notification.module.js';
+import { DelegationModule } from '../delegation/delegation.module.js';
+import { DelegationService } from '../delegation/delegation.service.js';
 
 @Module({
-  imports: [NotificationModule],
+  imports: [NotificationModule, DelegationModule],
   controllers: [DocumentWorkflowController, SlaSchedulerController],
   providers: [
     PrismaService,
@@ -16,8 +18,9 @@ import { NotificationModule } from '../notification/notification.module.js';
     SlaSchedulerService,
     {
       provide: WorkflowOrchestratorService,
-      useFactory: (prisma: PrismaService) => new WorkflowOrchestratorService(prisma),
-      inject: [PrismaService],
+      useFactory: (prisma: PrismaService, delegationService: DelegationService) =>
+        new WorkflowOrchestratorService(prisma, delegationService),
+      inject: [PrismaService, DelegationService],
     },
   ],
   exports: [WorkflowOrchestratorService, DocumentReadService, SlaSchedulerService],

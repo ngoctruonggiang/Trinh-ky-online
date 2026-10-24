@@ -99,6 +99,10 @@ export interface DecisionHistoryView {
   decision: AssigneeDecision;
   decisionComment?: string;
   decidedAt: string;
+  isDelegated?: boolean;
+  delegatedFromUserId?: string;
+  delegatedFromUserName?: string;
+  delegationPolicyId?: string;
 }
 
 export interface SignatureView {
@@ -162,6 +166,8 @@ export interface DocumentDetail extends DocumentItem {
     isCreator: boolean;
     isAdmin: boolean;
     currentStepAssigneeRole?: AssigneeRole;
+    isDelegatedApproval?: boolean;
+    delegatedFromUserName?: string;
   };
 }
 

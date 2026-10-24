@@ -915,6 +915,156 @@ Hệ thống cung cấp service quét định kỳ (mặc định mỗi 5 phút)
    - Thông báo không tồn tại trả về `404 Not Found`.
    - Không chứa bất kỳ dữ liệu nhạy cảm hoặc nội dung chi tiết biểu mẫu (`formData`) nào trong payload thông báo.
 
+---
+
+## 9. ĐỘNG CƠ ỦY QUYỀN & TÍCH HỢP QUY TRÌNH DUYỆT (DELEGATION POLICY ENGINE)
+
+### 9.1. Khái niệm & Ranh giới Nghiệp vụ
+1. **Phân biệt rạch ròi giữa Delegation và Reassignment:**
+   - **Reassignment (Chuyển giao):** Thay đổi trực tiếp người được phân công trong bước duyệt (`StepAssignee.userId`). Người cũ mất quyền duyệt, người mới trở thành người chịu trách nhiệm chính.
+   - **Delegation (Ủy quyền có chính sách):** Không thay đổi `StepAssignee`. Ghế duyệt ban đầu vẫn thuộc về người ủy quyền (`delegatorId`), nhưng người nhận ủy quyền (`delegateeId`) được trao thẩm quyền thực hiện quyết định thay mặt trong phạm vi và thời gian xác định.
+2. **Quy tắc Kiểm soát Chặt chẽ:**
+   - **Tenant Isolation:** Cả delegator và delegatee bắt buộc phải thuộc cùng một tổ chức (`organizationId`).
+   - **Chặn Tự ủy quyền (Self-Delegation):** Không cho phép `delegatorId === delegateeId`.
+   - **Tài khoản Hoạt động:** Cả delegator và delegatee phải ở trạng thái kích hoạt (`isActive: true`).
+   - **Kiểm tra Chu trình (Directed Cycle Detection):** Áp dụng thuật toán DFS ngăn chặn chu trình trực tiếp ($A \rightarrow B \rightarrow A$) và chu trình gián tiếp đa cấp ($A \rightarrow B \rightarrow C \rightarrow A$).
+   - **Ranh giới Pháp lý:** Quyết định ủy quyền ghi nhận chính xác vết kiểm toán danh tính người thực hiện (actual actor) và căn cứ chính sách; không tự động tuyên bố chữ ký đại diện có giá trị pháp lý điện tử X.509 khi chưa qua phase chứng thư số chính thức.
+
+---
+
+### 9.2. Chi tiết các API Endpoint
+
+#### ① Tạo chính sách ủy quyền mới
+- **Endpoint:** `POST /api/delegations`
+- **Quyền hạn:**
+  - `USER`: Chỉ được tạo ủy quyền cho chính mình (`delegatorId === actorId`). Nếu gửi `delegatorId` của người khác sẽ bị từ chối `403 Forbidden`.
+  - `ADMIN`: Được phép tạo ủy quyền thay mặt cho cán bộ trong cùng tổ chức.
+  - `SUPER_ADMIN`: Được phép tạo ủy quyền trên toàn hệ thống.
+- **Request Body (`CreateDelegationPolicyDto`):**
+```json
+{
+  "delegatorId": "uuid-nguoi-uy-quyen-tuy-chon",
+  "delegateeId": "uuid-nguoi-nhan-uy-quyen-bat-buoc",
+  "startDate": "2026-10-24T00:00:00.000Z",
+  "endDate": "2026-10-31T23:59:59.000Z",
+  "scopeDepartmentId": "uuid-phong-ban-tuy-chon",
+  "scopeTemplateId": "uuid-bieu-mau-tuy-chon",
+  "reason": "Đi công tác nước ngoài"
+}
+```
+- **Response Thành Công (201 Created):**
+```json
+{
+  "success": true,
+  "data": {
+    "id": "policy-uuid-1",
+    "organizationId": "org-uuid-1",
+    "delegatorId": "user-a-uuid",
+    "delegatorName": "Nguyễn Văn Giám Đốc A",
+    "delegatorEmail": "director.a@alpha.com",
+    "delegateeId": "user-b-uuid",
+    "delegateeName": "Trần Thị Phó Giám Đốc B",
+    "delegateeEmail": "deputy.b@alpha.com",
+    "startDate": "2026-10-24T00:00:00.000Z",
+    "endDate": "2026-10-31T23:59:59.000Z",
+    "scopeDepartmentId": null,
+    "scopeDepartmentName": null,
+    "scopeTemplateId": "tpl-payment-uuid",
+    "scopeTemplateTitle": "Giấy đề nghị thanh toán",
+    "reason": "Đi công tác nước ngoài",
+    "isActive": true,
+    "createdById": "user-a-uuid",
+    "createdByName": "Nguyễn Văn Giám Đốc A",
+    "revokedAt": null,
+    "revokedById": null,
+    "createdAt": "2026-10-23T12:00:00.000Z",
+    "updatedAt": "2026-10-23T12:00:00.000Z"
+  },
+  "timestamp": "2026-10-23T12:00:00.000Z"
+}
+```
+
+#### ② Truy vấn danh sách chính sách ủy quyền
+- **Endpoint:** `GET /api/delegations`
+- **Query Params:**
+  - `isActive`: `true` | `false` (Lọc theo trạng thái hiệu lực)
+  - `role`: `'delegator'` | `'delegatee'` | `'all'` (Mặc định: `'all'`)
+  - `page`: số trang (mặc định 1)
+  - `limit`: số bản ghi trên trang (mặc định 20, tối đa 100)
+- **Quyền hạn & Tenant Isolation:**
+  - `USER`: Chỉ xem các chính sách mà mình là người ủy quyền hoặc người nhận ủy quyền.
+  - `ADMIN`: Xem tất cả chính sách trong tổ chức của mình.
+  - `SUPER_ADMIN`: Xem chính sách toàn hệ thống.
+- **Response Thành Công (200 OK):**
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "policy-uuid-1",
+      "delegatorName": "Nguyễn Văn Giám Đốc A",
+      "delegateeName": "Trần Thị Phó Giám Đốc B",
+      "startDate": "2026-10-24T00:00:00.000Z",
+      "endDate": "2026-10-31T23:59:59.000Z",
+      "isActive": true
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "limit": 20,
+    "total": 1,
+    "totalPages": 1
+  },
+  "timestamp": "2026-10-23T12:00:00.000Z"
+}
+```
+
+#### ③ Xem chi tiết chính sách ủy quyền
+- **Endpoint:** `GET /api/delegations/:id`
+- **Quyền hạn:** `delegator`, `delegatee`, `ADMIN` của tổ chức sở hữu, hoặc `SUPER_ADMIN`. Người ngoài bị chặn `403 Forbidden`.
+
+#### ④ Cập nhật chính sách ủy quyền
+- **Endpoint:** `PATCH /api/delegations/:id`
+- **Request Body (`UpdateDelegationPolicyDto`):**
+```json
+{
+  "endDate": "2026-11-05T23:59:59.000Z",
+  "reason": "Gia hạn thêm do chuyến công tác kéo dài",
+  "scopeDepartmentId": null,
+  "scopeTemplateId": null
+}
+```
+- **Ràng buộc:** Không được sửa chính sách đã bị thu hồi (`isActive: false`) hoặc đã quá hạn (`endDate <= now`).
+
+#### ⑤ Thu hồi chính sách ủy quyền (Soft Revoke)
+- **Endpoint:** `POST /api/delegations/:id/revoke`
+- **Quyền hạn:** Delegator, Admin cùng công ty, hoặc Super Admin.
+- **Request Body:** `{ "reason": "Chuyến công tác kết thúc sớm" }`
+- **Cơ chế:** Chuyển `isActive = false`, ghi nhận `revokedAt`, `revokedById`, ghi `AuditLog` và gửi `Notification` thông báo cho người nhận ủy quyền.
+
+---
+
+### 9.3. Động cơ Giải quyết Chính sách (Policy Resolution Engine)
+Khi người dùng gọi `POST /api/documents/:id/decision`:
+1. Nếu `userId` từ JWT trùng với một `StepAssignee` đang ở trạng thái `PENDING`: Xử lý phê duyệt trực tiếp thông thường (`isDelegated: false`).
+2. Nếu `userId` không phải là assignee trực tiếp:
+   - Hệ thống quét các chính sách đang hiệu lực (`isActive: true`, `startDate <= now <= endDate`) trong cùng `organizationId` nối từ các pending approver tới `userId`.
+   - **Quy tắc Tính Điểm Ưu tiên Cụ thể (Specificity Score):**
+     - **3 điểm:** Khớp cả `scopeTemplateId` và `scopeDepartmentId`.
+     - **2 điểm:** Khớp `scopeTemplateId`.
+     - **1 điểm:** Khớp `scopeDepartmentId`.
+     - **0 điểm:** Toàn tổ chức (cả 2 scope đều null).
+   - **Tie-breaking:** Nếu nhiều chính sách có cùng điểm ưu tiên, chính sách được tạo gần nhất (`createdAt` mới nhất) sẽ được áp dụng (Deterministic Resolution).
+3. **Attribution & Audit Trail:**
+   - Cập nhật quyết định của ghế duyệt ban đầu (`targetAssignee`) trong FSM, bảo toàn hoàn toàn completion rule và transition state.
+   - Bản ghi `StepDecisionHistory` lưu:
+     - `userId`: ID của người thực tế bấm duyệt (actual actor).
+     - `isDelegated`: `true`.
+     - `delegatedFromUserId`: ID của người ủy quyền ban đầu.
+     - `delegationPolicyId`: ID chính sách đã áp dụng.
+   - Bản ghi `SignatureEvent` gắn chữ ký điện tử thực tế của actual actor.
+   - Bản ghi `AuditLog` lưu chi tiết ủy quyền và gửi thông báo in-app cho người ủy quyền biết hành động đã được thực hiện thay mặt mình.
+
 
 
 

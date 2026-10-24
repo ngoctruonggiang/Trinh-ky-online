@@ -428,9 +428,16 @@ export default function DocumentDetailPage({
                 {document.decisionHistories.map((hist) => (
                   <div key={hist.id} className="p-3.5 rounded-lg border border-slate-200 bg-slate-50/50 text-xs">
                     <div className="flex items-center justify-between mb-1">
-                      <span className="font-semibold text-slate-800">
-                        {hist.stepName} — {hist.userName}
-                      </span>
+                      <div className="flex items-center gap-2">
+                        <span className="font-semibold text-slate-800">
+                          {hist.stepName} — {hist.userName}
+                        </span>
+                        {hist.isDelegated && (
+                          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-2xs font-medium bg-amber-100 text-amber-800 border border-amber-200">
+                            Ủy quyền từ {hist.delegatedFromUserName || 'Cán bộ'}
+                          </span>
+                        )}
+                      </div>
                       <span className="text-2xs text-slate-400">
                         {new Date(hist.decidedAt).toLocaleString('vi-VN')}
                       </span>

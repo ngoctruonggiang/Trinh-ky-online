@@ -1052,10 +1052,219 @@ async function runLiveTests() {
   }
   console.log('   -> PASS (Chặn USER thường kích hoạt retry-failed chuẩn RBAC)\n');
 
+  // =========================================================================
+  // PHASE 12.1: DELEGATION POLICY ENGINE & AUDITABLE WORKFLOW INTEGRATION
+  // =========================================================================
+  console.log('--- BẮT ĐẦU KIỂM THỬ PHASE 12.1: DELEGATION POLICY ENGINE & WORKFLOW ---');
+
+  // Test 42: Chặn ủy quyền xuyên tổ chức (Cross-Tenant Delegation Blocked)
+  console.log('42. Test POST /api/delegations chặn ủy quyền xuyên tổ chức (UserA Alpha -> UserB Beta):');
+  const resDelCross = await fetch(`${API_BASE}/delegations`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenUserA}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      delegateeId: userB.id,
+      startDate: new Date().toISOString(),
+      endDate: new Date(Date.now() + 86400000).toISOString(),
+      reason: 'Ủy quyền sang công ty khác',
+    }),
+  });
+  console.log(`   HTTP Status: ${resDelCross.status}`);
+  if (resDelCross.status !== 400) {
+    throw new Error(`Test 42 thất bại: Không chặn ủy quyền xuyên tổ chức (nhận ${resDelCross.status})`);
+  }
+  console.log('   -> PASS (Bảo vệ ranh giới tổ chức / Tenant Isolation thành công)\n');
+
+  // Test 43: Chặn tự ủy quyền cho chính mình (Self-Delegation Blocked)
+  console.log('43. Test POST /api/delegations chặn tự ủy quyền cho chính mình:');
+  const resDelSelf = await fetch(`${API_BASE}/delegations`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenUserA}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      delegateeId: userA.id,
+      startDate: new Date().toISOString(),
+      endDate: new Date(Date.now() + 86400000).toISOString(),
+      reason: 'Tự ủy quyền cho mình',
+    }),
+  });
+  console.log(`   HTTP Status: ${resDelSelf.status}`);
+  if (resDelSelf.status !== 400) {
+    throw new Error(`Test 43 thất bại: Không chặn tự ủy quyền (nhận ${resDelSelf.status})`);
+  }
+  console.log('   -> PASS (Chặn tự ủy quyền thành công)\n');
+
+  // Test 44: USER thường bị chặn 403 khi cố tạo ủy quyền thay mặt người khác
+  console.log('44. Test USER thường bị chặn 403 khi thiết lập delegatorId thay mặt người khác:');
+  const resDelSpoof = await fetch(`${API_BASE}/delegations`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenUserA}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      delegatorId: newApproverAlpha.id,
+      delegateeId: userA.id,
+      startDate: new Date().toISOString(),
+      endDate: new Date(Date.now() + 86400000).toISOString(),
+    }),
+  });
+  console.log(`   HTTP Status: ${resDelSpoof.status}`);
+  if (resDelSpoof.status !== 403) {
+    throw new Error(`Test 44 thất bại: USER thường không bị chặn khi tạo thay người khác (nhận ${resDelSpoof.status})`);
+  }
+  console.log('   -> PASS (Chặn quyền tạo thay mặt trái phép chuẩn RBAC)\n');
+
+  // Test 45: Tạo Delegation Policy hợp lệ qua Live HTTP (UserA -> newApproverAlpha)
+  console.log('45. Test POST /api/delegations tạo chính sách ủy quyền hợp lệ trong nội bộ Alpha:');
+  const nowDel = Date.now();
+  const resDelCreate = await fetch(`${API_BASE}/delegations`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenUserA}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      delegateeId: newApproverAlpha.id,
+      startDate: new Date(nowDel - 60000).toISOString(),
+      endDate: new Date(nowDel + 3 * 86400000).toISOString(),
+      reason: 'Đi công tác tuần này',
+    }),
+  });
+  const bodyDelCreate = await resDelCreate.json();
+  console.log(`   HTTP Status: ${resDelCreate.status} | Policy ID: ${bodyDelCreate.data?.id}`);
+  if (resDelCreate.status !== 201 || !bodyDelCreate.data?.id || bodyDelCreate.data?.isActive !== true) {
+    throw new Error(`Test 45 thất bại: Tạo delegation policy không thành công (nhận ${resDelCreate.status})`);
+  }
+  const createdPolicyId = bodyDelCreate.data.id;
+  console.log('   -> PASS (Tạo chính sách ủy quyền thành công và ghi nhận đầy đủ metadata)\n');
+
+  // Test 46: Lấy danh sách GET /api/delegations và GET /api/delegations/:id
+  console.log('46. Test GET /api/delegations và GET /api/delegations/:id:');
+  const resDelList = await fetch(`${API_BASE}/delegations?isActive=true`, {
+    headers: { Authorization: `Bearer ${tokenUserA}` },
+  });
+  const bodyDelList = await resDelList.json();
+  const resDelDetail = await fetch(`${API_BASE}/delegations/${createdPolicyId}`, {
+    headers: { Authorization: `Bearer ${tokenUserA}` },
+  });
+  const bodyDelDetail = await resDelDetail.json();
+  console.log(`   List Status: ${resDelList.status} | Items: ${bodyDelList.data?.length} | Detail Status: ${resDelDetail.status}`);
+  if (resDelList.status !== 200 || resDelDetail.status !== 200 || bodyDelDetail.data?.id !== createdPolicyId) {
+    throw new Error('Test 46 thất bại: Truy vấn danh sách/chi tiết delegation policy không thành công');
+  }
+  console.log('   -> PASS (Truy vấn danh sách và chi tiết policy hoạt động chính xác)\n');
+
+  // Test 47: Delegatee (newApproverAlpha) thực hiện phê duyệt proxy qua Live HTTP
+  console.log('47. Test Delegatee phê duyệt hồ sơ thay mặt UserA qua Live HTTP (POST /api/documents/:id/decision):');
+  // Tạo hồ sơ mới và gán UserA là người duyệt bước 1
+  const templatePub = await prisma.formTemplate.findFirstOrThrow({
+    where: { organizationId: userA.organizationId!, status: 'PUBLISHED' },
+    include: { versions: { orderBy: { versionNumber: 'desc' }, take: 1 } },
+  });
+  const docDelTest = await prisma.document.create({
+    data: {
+      documentNumber: `TK-DEL-${Date.now()}`,
+      title: 'Hồ sơ thử nghiệm phê duyệt ủy quyền qua Live HTTP',
+      templateId: templatePub.id,
+      templateVersionId: templatePub.versions[0]?.id || null,
+      status: 'IN_REVIEW',
+      urgency: 'NORMAL',
+      currentStepOrder: 1,
+      currentVersion: 1,
+      createdById: userA.id,
+      organizationId: userA.organizationId,
+      versions: {
+        create: {
+          versionNumber: 1,
+          formData: { tieu_de: 'Ủy quyền test', amount: 10000000 },
+          sha256Hash: 'dummyhash',
+          createdById: userA.id,
+        },
+      },
+      workflow: {
+        create: {
+          status: 'RUNNING',
+          currentStepOrder: 1,
+          version: 1,
+          steps: {
+            create: {
+              stepOrder: 1,
+              stepName: 'Bước 1: Giám đốc duyệt',
+              stepType: 'SEQUENTIAL',
+              completionRule: 'ALL_MUST_APPROVE',
+              status: 'IN_PROGRESS',
+              dueDays: 3,
+              version: 1,
+              assignees: {
+                create: {
+                  userId: userA.id, // UserA là Assignee gốc!
+                  role: 'APPROVER',
+                  decision: 'PENDING',
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  });
+
+  // newApproverAlpha gọi API phê duyệt hồ sơ này
+  const resProxyApprove = await fetch(`${API_BASE}/documents/${docDelTest.id}/decision`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenNewApprover}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      decision: 'APPROVED',
+      decisionComment: 'Phê duyệt thay mặt theo ủy quyền',
+      signatureImageUrl: 'data:image/png;base64,proxySignature',
+    }),
+  });
+  const bodyProxyApprove = await resProxyApprove.json();
+  console.log(`   HTTP Status: ${resProxyApprove.status} | Document Status: ${bodyProxyApprove.data?.documentStatus}`);
+  if (resProxyApprove.status !== 200 || !bodyProxyApprove.success) {
+    throw new Error(`Test 47 thất bại: Delegatee không thể phê duyệt theo ủy quyền (nhận ${resProxyApprove.status})`);
+  }
+
+  // Kiểm tra lịch sử quyết định trong PostgreSQL thật
+  const historyCheck = await prisma.stepDecisionHistory.findFirst({
+    where: { documentVersion: { documentId: docDelTest.id } },
+  });
+  console.log(`   History isDelegated: ${historyCheck?.isDelegated} | DelegatedFrom: ${historyCheck?.delegatedFromUserId}`);
+  if (!historyCheck?.isDelegated || historyCheck.delegatedFromUserId !== userA.id || historyCheck.delegationPolicyId !== createdPolicyId) {
+    throw new Error('Test 47 thất bại: StepDecisionHistory không lưu đúng attribution ủy quyền');
+  }
+  console.log('   -> PASS (Delegatee phê duyệt proxy thành công, attribution lưu chuẩn xác vào DB)\n');
+
+  // Test 48: Thu hồi chính sách ủy quyền (Soft Revoke) qua Live HTTP
+  console.log('48. Test POST /api/delegations/:id/revoke thu hồi chính sách ủy quyền:');
+  const resDelRevoke = await fetch(`${API_BASE}/delegations/${createdPolicyId}/revoke`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenUserA}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ reason: 'Chuyến công tác kết thúc sớm' }),
+  });
+  const bodyDelRevoke = await resDelRevoke.json();
+  console.log(`   HTTP Status: ${resDelRevoke.status} | Policy isActive: ${bodyDelRevoke.data?.isActive}`);
+  if (resDelRevoke.status !== 200 || bodyDelRevoke.data?.isActive !== false) {
+    throw new Error('Test 48 thất bại: Thu hồi delegation policy không thành công');
+  }
+  console.log('   -> PASS (Thu hồi chính sách ủy quyền thành công qua Live HTTP)\n');
+
   await prisma.$disconnect();
   console.log('========================================================================');
-  console.log('🎉 TẤT CẢ 41/41 KỊCH BẢN KIỂM THỬ LIVE HTTP & SECURITY TRÊN POSTGRESQL');
-  console.log('   (BAO GỒM REASSIGNMENT, SLA SCHEDULER & NOTIFICATION RETRY/IDEMPOTENCY)');
+  console.log('🎉 TẤT CẢ 48/48 KỊCH BẢN KIỂM THỬ LIVE HTTP & SECURITY TRÊN POSTGRESQL');
+  console.log('   (BAO GỒM REASSIGNMENT, SLA SCHEDULER, NOTIFICATION & DELEGATION ENGINE)');
   console.log('   ĐÃ PASS 100%!');
   console.log('========================================================================');
 }
