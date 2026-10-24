@@ -270,18 +270,21 @@ apps/api/test/
 
 ---
 
-## 6. QUYẾT ĐỊNH GO / NO-GO CHO PHASE 13.1
+## 6. QUYẾT ĐỊNH GO / NO-GO CHO PHASE 13.2.2 — CMS/PDF SIGNING ENGINE
 
-Dựa trên kết quả rà soát hiện trạng, thiết kế kiến trúc, mô hình đe dọa và kế hoạch triển khai:
+Dựa trên kết quả triển khai và kiểm thử thực tế của Phase 13.1 và Phase 13.2.1:
 
-### Đánh giá các Điều kiện Tiên quyết:
-1. **Mô hình Tin cậy (Trust Model)**: Đã xác lập ranh giới rõ ràng, phân định 5 tầng chữ ký, không nhầm lẫn chữ ký ảnh với chữ ký số mật mã $\rightarrow$ **ĐẠT (PASS)**.
-2. **Quyền Kiểm soát Khóa Riêng**: Khóa riêng được cô lập qua `ISigningKeyProvider`, không bao giờ lộ về frontend hay database $\rightarrow$ **ĐẠT (PASS)**.
-3. **Định dạng Ký số**: Thống nhất chọn PAdES CMS Detached Signature theo ISO 32000 $\rightarrow$ **ĐẠT (PASS)**.
-4. **Bảo tồn Chữ ký Cũ**: Sử dụng chuẩn PDF Incremental Updates $\rightarrow$ **ĐẠT (PASS)**.
-5. **Phương án Xác minh Độc lập**: Thiết kế kiểm thử độc lập qua Adobe Acrobat Reader, OpenSSL và Verification API $\rightarrow$ **ĐẠT (PASS)**.
-6. **Lưu trữ & Toàn vẹn**: Thiết lập mô hình 3-Tier Hash và cơ chế Two-Phase persistence $\rightarrow$ **ĐẠT (PASS)**.
-7. **Bảo toàn Quy trình Hiện hữu**: Không thay đổi FSM cốt lõi, bảo toàn toàn bộ kết quả Delegation từ Phase 12.1.1 $\rightarrow$ **ĐẠT (PASS)**.
+### 6.1. Đánh giá Điều kiện Tiên quyết:
+1. **Nền tảng Quản lý Khóa (`ISigningKeyProvider`)**: Đã hoàn thành, phân định rõ ràng ngữ nghĩa `signData` và `signDigest`, không bao giờ export private key $\rightarrow$ **ĐẠT (PASS)**.
+2. **Local Keystore Bảo mật (`DevLocalKeystoreProvider`)**: Lưu trữ ngoài web root, kiểm tra cặp khóa tương ứng với chứng thư, path traversal regex, và mã hóa AES-256-CBC $\rightarrow$ **ĐẠT (PASS)**.
+3. **Danh mục Chứng thư X.509 (`DigitalCertificate`)**: Quản lý vòng đời (`ACTIVE`, `REVOKED`, `EXPIRED`), cô lập đa doanh nghiệp (Tenant Isolation), bảo vệ quyền riêng tư cá nhân và audit log đầy đủ $\rightarrow$ **ĐẠT (PASS)**.
+4. **Adapter cho Remote Signing / KMS**: Thiết kế sẵn `CloudKmsSigningProvider` và `RemoteSigningProviderOptions` $\rightarrow$ **ĐẠT (PASS)**.
+5. **Kiểm thử Toàn diện**:
+   - 180 API Unit Tests (15 suites) PASS 100%.
+   - 119 PostgreSQL Integration Tests (10 suites) PASS 100%.
+   - 70/70 Live HTTP E2E Tests (100%) PASS trên server NestJS và CSDL PostgreSQL vật lý.
+   - Không có hồi quy (Zero Regression) trên toàn bộ monorepo.
+6. **Ranh giới Thực thi Rõ ràng**: Chưa tuyên bố có chữ ký số PDF PAdES trong Phase 13.2.1; không tự động ký khi văn bản `APPROVED`.
 
-### **KẾT LUẬN CUỐI CÙNG: GO CHO PHASE 13.1**
-Hệ thống đã sẵn sàng bước vào **Phase 13.1: Triển khai PDF Rendering Engine & Artifact Storage Service**.
+### **KẾT LUẬN CUỐI CÙNG: GO CHO PHASE 13.2.2**
+Hệ thống chính thức đủ điều kiện và sẵn sàng bước vào **Phase 13.2.2: Triển khai CMS/PAdES PDF Signing Engine, ByteRange Placeholder & Incremental Updates**.

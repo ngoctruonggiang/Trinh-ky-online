@@ -1388,13 +1388,52 @@ Phần này quy định các giao ước API phục vụ việc kết xuất PDF
 
 ---
 
-### 10.5. Tra cứu danh mục chứng thư số theo quyền
+### 10.5. Đăng ký chứng thư số công khai (Register Digital Certificate)
+- **Endpoint:** `POST /api/certificates`
+- **Quyền hạn:** `ADMIN` (đăng ký cho nhân viên/tổ chức thuộc công ty mình), `SUPER_ADMIN` (toàn quyền). `USER` thường bị từ chối 403 Forbidden.
+- **Request Body:**
+  ```json
+  {
+    "userId": "00000000-0000-0000-0000-000000000001",
+    "certificatePem": "-----BEGIN CERTIFICATE-----\nMIIDXTCCAkWgAwIBAgIU...\n-----END CERTIFICATE-----",
+    "keyAlias": "dev_key_alias_user_1",
+    "keyStorageType": "DEV_KEYSTORE"
+  }
+  ```
+  *(Ghi chú: `keyStorageType` có thể là `DEV_KEYSTORE`, `CLOUD_KMS`, hoặc `REMOTE_SMART_CA`. Nếu là chứng thư đại diện tổ chức thì bỏ qua `userId`).*
+- **Response Thành công (HTTP 201 Created):**
+  ```json
+  {
+    "success": true,
+    "data": {
+      "id": "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d",
+      "organizationId": "org-uuid-vina",
+      "userId": "00000000-0000-0000-0000-000000000001",
+      "userFullName": "Nguyễn Văn A",
+      "fingerprintSha256": "4b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c",
+      "serialNumber": "5f3a89bc1200e4",
+      "subjectDn": "CN=Nguyễn Văn A, O=Tập đoàn VinaGroup, C=VN",
+      "issuerDn": "CN=VinaGroup Internal Root CA, O=VinaGroup",
+      "validFrom": "2026-01-01T00:00:00.000Z",
+      "validTo": "2027-01-01T00:00:00.000Z",
+      "status": "ACTIVE",
+      "keyStorageType": "DEV_KEYSTORE",
+      "keyAlias": "dev_key_alias_user_1",
+      "createdAt": "2026-10-24T10:00:00.000Z",
+      "updatedAt": "2026-10-24T10:00:00.000Z"
+    }
+  }
+  ```
+
+---
+
+### 10.6. Tra cứu danh mục chứng thư số (List Certificates)
 - **Endpoint:** `GET /api/certificates`
 - **Query Parameters:**
-  - `status`: `ACTIVE` | `REVOKED` | `EXPIRED` | `all` (Mặc định `ACTIVE`)
-  - `type`: `PERSONAL` | `ORGANIZATION` | `all`
+  - `status`: `ACTIVE` | `REVOKED` | `EXPIRED` | `all` (Mặc định: `ACTIVE`)
+  - `type`: `PERSONAL` | `ORGANIZATION` | `all` (Mặc định: `all`)
 - **Quyền hạn:**
-  - `USER`: Chỉ xem các chứng thư cá nhân được gán cho chính mình (`userId === currentUser.id`) trong cùng tổ chức.
+  - `USER`: Chỉ xem các chứng thư cá nhân gán cho chính mình (`userId === currentUser.id`) trong cùng tổ chức.
   - `ADMIN`: Xem toàn bộ chứng thư thuộc công ty mình quản lý.
   - `SUPER_ADMIN`: Xem danh mục chứng thư toàn hệ thống.
 - **Response (HTTP 200 OK):**
@@ -1407,16 +1446,72 @@ Phần này quy định các giao ước API phục vụ việc kết xuất PDF
           "id": "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d",
           "subjectDn": "CN=Nguyễn Văn A, O=Tập đoàn VinaGroup, C=VN",
           "issuerDn": "CN=VinaGroup Internal Root CA, O=VinaGroup",
-          "serialNumber": "5F3A89BC1200E4",
+          "serialNumber": "5f3a89bc1200e4",
           "fingerprintSha256": "4b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c",
           "validFrom": "2026-01-01T00:00:00.000Z",
           "validTo": "2027-01-01T00:00:00.000Z",
           "status": "ACTIVE",
           "keyStorageType": "DEV_KEYSTORE",
+          "keyAlias": "dev_key_alias_user_1",
           "userId": "00000000-0000-0000-0000-000000000001",
           "userFullName": "Nguyễn Văn A"
         }
       ]
+    }
+  }
+  ```
+
+---
+
+### 10.7. Xem chi tiết chứng thư số (Get Certificate Detail)
+- **Endpoint:** `GET /api/certificates/:id`
+- **Quyền hạn:** Tương tự danh mục (`USER` chỉ xem cert cá nhân của mình; `ADMIN` xem cert cùng tổ chức; `SUPER_ADMIN` xem toàn bộ).
+- **Response (HTTP 200 OK):** Trả về đầy đủ metadata bao gồm cả `certificatePem` (khóa công khai) nhưng KHÔNG BAO GIỜ trả khóa riêng hoặc mật khẩu.
+
+---
+
+### 10.8. Cập nhật trạng thái / Thu hồi chứng thư số (Revoke Certificate)
+- **Endpoint:** `PATCH /api/certificates/:id/status`
+- **Quyền hạn:** `ADMIN` hoặc `SUPER_ADMIN`.
+- **Request Body:**
+  ```json
+  {
+    "status": "REVOKED",
+    "reason": "Khóa riêng bị nghi ngờ lộ hoặc nhân viên đã thôi việc"
+  }
+  ```
+- **Response Thành công (HTTP 200 OK):**
+  ```json
+  {
+    "success": true,
+    "data": {
+      "id": "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d",
+      "status": "REVOKED",
+      "revokedReason": "Khóa riêng bị nghi ngờ lộ hoặc nhân viên đã thôi việc",
+      "revokedAt": "2026-10-24T10:15:00.000Z"
+    }
+  }
+  ```
+
+---
+
+### 10.9. Thử nghiệm ký số và đối soát chữ ký X.509 (Test Sign & Verify)
+- **Endpoint:** `POST /api/certificates/:id/test-sign`
+- **Mục đích:** Kiểm tra tính sẵn sàng hoạt động của Keystore/KMS và đối soát chữ ký tạo ra với khóa công khai trong chứng thư số. Tuyệt đối không phục vụ ký ban hành văn bản.
+- **Quyền hạn:** Chỉ chính chủ sở hữu chứng thư cá nhân (`userId === currentUser.id`) hoặc `ADMIN`/`SUPER_ADMIN` đối với chứng thư tổ chức. Chặn triệt để hành vi ký mạo danh hoặc xuyên tổ chức (403 Forbidden). Chặn ký nếu chứng thư đã bị thu hồi `REVOKED` (400 Bad Request).
+- **Response Thành công (HTTP 200 OK):**
+  ```json
+  {
+    "success": true,
+    "data": {
+      "certificateId": "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d",
+      "keyAlias": "dev_key_alias_user_1",
+      "algorithm": "RSASSA_PKCS1_v1_5_SHA256",
+      "dataSignatureLength": 256,
+      "dataSignatureValid": true,
+      "digestSignatureLength": 256,
+      "digestSignatureValid": true,
+      "message": "Kiểm thử ký dữ liệu thô và 32-byte SHA-256 digest thành công 100% với khóa công khai X.509."
     }
   }
   ```

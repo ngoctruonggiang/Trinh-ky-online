@@ -1,8 +1,8 @@
 # KIẾN TRÚC KÝ SỐ MẬT MÃ PDF (CRYPTOGRAPHIC PDF DIGITAL SIGNING ARCHITECTURE)
 *Dự án: Trình Ký Online Nội Bộ Doanh Nghiệp / Tập Đoàn (Monorepo)*  
-*Giai đoạn: Phase 13.1 — PDF Rendering Engine & Secure Artifact Storage*  
-*Tác giả: Senior Security Architect & Senior Backend Engineer*  
-*Trạng thái: PHASE 13.1 HOÀN THÀNH — ĐÃ TRIỂN KHAI VÀ ĐẠT 100% KIỂM THỬ (Sẵn sàng cho Phase 13.2)*
+*Giai đoạn: Phase 13.2.1 — Signing Provider, X.509 Certificate Registry & Secure Local Keystore*  
+*Tác giả: Senior Cryptographic Engineer & Application Security Engineer*  
+*Trạng thái: PHASE 13.2.1 HOÀN THÀNH — ĐÃ TRIỂN KHAI VÀ ĐẠT 100% KIỂM THỬ (Sẵn sàng cho Phase 13.2.2)*
 
 ---
 
@@ -398,38 +398,56 @@ sequenceDiagram
 
 ## 9. ĐỀ XUẤT CÁC MODULE NESTJS DÀNH CHO PHASE 13
 
-Để triển khai kiến trúc trên trong Phase 13.1 - 13.4, hệ thống backend NestJS sẽ bổ sung module chuyên trách `DigitalSigningModule`:
+## 9. CÁC MODULE ĐÃ TRIỂN KHAI CHO GIAI ĐOẠN 13.2.1
+
+Trong Phase 13.2.1, hệ thống đã hoàn thiện module quản lý khóa và danh mục chứng thư số (`SigningModule`):
 
 ```
 apps/api/src/modules/signing/
-├── digital-signing.module.ts
-├── controllers/
-│   ├── signing.controller.ts            # API yêu cầu ký, kiểm tra trạng thái ký
-│   └── verification.controller.ts       # API tải và xác minh độc lập tệp PDF
-├── services/
-│   ├── pdf-generator.service.ts         # Sinh tệp PDF từ dữ liệu snapshot
-│   ├── pdf-signer.service.ts            # Xử lý ByteRange, CMS placeholder và chèn chữ ký
-│   ├── pdf-verifier.service.ts          # Bộ xác minh chữ ký độc lập trong backend
-│   ├── certificate-registry.service.ts  # Quản lý X.509, trạng thái active/revoked
-│   └── signing-orchestrator.service.ts  # Điều phối luồng ký, lock, transaction
-├── providers/
-│   ├── key-provider.interface.ts        # Contract trừu tượng cho nhà cung cấp khóa
-│   ├── dev-keystore.provider.ts         # Provider mock/dev lưu PKCS#12 mã hóa
-│   ├── cloud-kms.provider.ts            # Provider tích hợp KMS/Vault (chuẩn bị)
-│   └── storage/
-│       ├── storage.interface.ts         # Contract lưu trữ artifact
-│       └── local-storage.provider.ts    # Lưu trữ ổ đĩa theo tenant
-└── dto/
-    ├── sign-request.dto.ts
-    ├── sign-status-response.dto.ts
-    └── verify-result.dto.ts
+├── signing.module.ts                         # Đăng ký providers và controllers vào AppModule
+├── certificate.controller.ts                 # REST API quản lý chứng thư và kiểm thử ký
+├── certificate-registry.service.ts           # Nghiệp vụ quản lý vòng đời chứng thư X.509
+├── dev-keystore-generator.ts                 # Tiện ích tạo PKCS#12 tự ký cho môi trường DEV
+└── providers/
+    ├── signing-key-provider.interface.ts     # Hợp đồng trừu tượng ISigningKeyProvider
+    ├── remote-signing.interface.ts           # Hợp đồng mở rộng cho Remote KMS/HSM/SmartCA
+    ├── dev-local-keystore.provider.ts        # Provider phát triển với local PKCS#12 (.p12)
+    └── cloud-kms-signing.provider.ts         # Adapter stub cho Cloud KMS / VNPT SmartCA
 ```
+
+### 9.1. Hợp đồng `ISigningKeyProvider`
+- **Không bao giờ trả Private Key ra ngoài**: Mọi thao tác ký được đóng gói trong provider.
+- **Rõ ràng ngữ nghĩa đầu vào (Input Semantics)**:
+  - `signData(keyAlias, rawData)`: Nhận buffer dữ liệu thô, provider tự băm SHA-256 và ký RSASSA-PKCS1-v1_5.
+  - `signDigest(keyAlias, digest32Bytes)`: Nhận chính xác 32-byte SHA-256 digest, provider bọc ASN.1 `DigestInfo` (`3031300d060960864801650304020105000420`) và mã hóa RSA private key padding `RSA_PKCS1_PADDING`.
+  - Hai phương thức trên cho ra kết quả tương thích 100% với nhau và đối soát khớp hoàn hảo với `crypto.verify('sha256', rawData, publicKeyPem, sig)`.
+
+### 9.2. Bảo mật Local Keystore (`DevLocalKeystoreProvider`)
+- Tệp keystore được lưu tại `apps/api/storage/keystores/dev/{keyAlias}.p12`, nằm ngoài web root.
+- Chặn đứng tấn công duyệt thư mục (Path Traversal) bằng regex `^[a-zA-Z0-9_-]+$`.
+- Mật khẩu giải mã lấy qua biến môi trường `DEV_SIGNING_PASSPHRASE`. Tuyệt đối không hardcode trong mã nguồn, không ghi log mật khẩu hoặc buffer nhị phân.
+- Tự động kiểm tra tính tương khớp giữa cặp khóa RSA và chứng thư số X.509 tại thời điểm import.
+
+### 9.3. Danh mục Chứng thư X.509 (`DigitalCertificate`)
+- Lưu trữ trong cơ sở dữ liệu PostgreSQL với các trường: `fingerprintSha256` (Unique), `serialNumber`, `subjectDn`, `issuerDn`, `validFrom`, `validTo`, `status` (`ACTIVE`, `REVOKED`, `EXPIRED`), `keyStorageType`, `keyAlias`.
+- Chỉ lưu `certificatePem` (Khóa công khai). **Tuyệt đối không lưu khóa riêng** trong CSDL.
+- **Phân quyền và Cô lập Đa tổ chức (Tenant Isolation)**:
+  - Chỉ `ADMIN` và `SUPER_ADMIN` mới được phép đăng ký hoặc thu hồi (`REVOKED`) chứng thư.
+  - `USER` chỉ được xem chứng thư cá nhân của chính mình.
+  - Chặn triệt để hành vi ký mạo danh hoặc ký bằng chứng thư của tổ chức khác (HTTP 403 Forbidden).
+  - Không cho phép cập nhật thay đổi `organizationId` hoặc `userId` trên chứng thư đã tạo.
+
+### 9.4. Cơ chế chuyển đổi sang Remote Provider (KMS / HSM)
+- Khi triển khai môi trường Production, `ISigningKeyProvider` sẽ được inject bằng `CloudKmsSigningProvider` hoặc `SmartCaSigningProvider`.
+- Ứng dụng chỉ cần thay đổi cấu hình `keyStorageType` trong bảng `DigitalCertificate`, toàn bộ logic ký CMS và xác minh giữ nguyên không thay đổi.
 
 ---
 
-## 10. TỔNG KẾT KIẾN TRÚC
+## 10. TỔNG KẾT KIẾN TRÚC & RANH GIỚI HIỆN TẠI
 
-Kiến trúc Ký số Mật mã PDF đề xuất đảm bảo:
-- **Tương thích tuyệt đối với Workflow hiện có**: Không phá vỡ FSM, bảo toàn logic phân quyền, bảo toàn attribution ủy quyền đã hoàn thành tại Phase 12.1.1.
-- **Tuân thủ chuẩn quốc tế**: Áp dụng chuẩn ISO 32000, CMS/PKCS#7, PAdES Incremental Update, cho phép xác minh độc lập trên các phần mềm đọc PDF tiêu chuẩn toàn cầu.
-- **Bảo mật nhiều lớp**: Phân định rõ ràng giữa môi trường phát triển (Dev Keystore có kiểm soát) và môi trường vận hành thực tế (Cloud KMS / HSM / SmartCA), bảo vệ khóa riêng không bao giờ lộ ra ngoài, cô lập tuyệt đối dữ liệu giữa các công ty thành viên.
+- **Đã hoàn thành Phase 13.1**: PDF Rendering Engine (`PdfGeneratorService`) và Secure Local Storage (`StorageService`).
+- **Đã hoàn thành Phase 13.2.1**: Nền tảng quản lý khóa `ISigningKeyProvider`, Keystore cục bộ bảo mật, và Certificate Registry phân quyền đa doanh nghiệp.
+- **Ranh giới chưa triển khai (Dành cho Phase 13.2.2 & 13.3)**:
+  - Chưa triển khai cấu trúc CMS/PKCS#7 nhúng vào PDF (`/ByteRange`, `/Contents`).
+  - Chưa triển khai dịch vụ đóng dấu thời gian tin cậy (RFC 3161 TSA).
+  - Chưa tự động ký khi tài liệu chuyển sang `APPROVED`. Tệp PDF hiện tại vẫn là tài liệu thô chưa có chữ ký số mật mã PAdES.

@@ -34,6 +34,10 @@ Thumbs.db
 /apps/api/prisma/*.db
 /apps/api/prisma/*.db-journal
 
-# Storage artifacts (Local disk storage provider)
+# Storage artifacts (Local disk storage provider & Keystores)
 /apps/api/storage/
 storage/
+*.p12
+*.pfx
+*.key
+*.pem.key

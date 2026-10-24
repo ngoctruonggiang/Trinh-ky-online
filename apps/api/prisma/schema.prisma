@@ -34,6 +34,7 @@ model Organization {
   workflowTemplates WorkflowTemplate[]
   delegationPolicies DelegationPolicy[]
   artifacts         DocumentArtifact[]
+  certificates      DigitalCertificate[]
 
   @@map("organizations")
 }
@@ -92,6 +93,7 @@ model User {
   reassignmentsAsActor            StepReassignmentHistory[] @relation("ReassignmentActor")
   notifications                   Notification[]
   requestedArtifacts              DocumentArtifact[]        @relation("ArtifactRequester")
+  certificates                    DigitalCertificate[]
 
   @@map("users")
 }
@@ -655,4 +657,48 @@ model DocumentArtifact {
   @@map("document_artifacts")
 }
 
+// -------------------------------------------------------------
+// 9. QUẢN LÝ CHỨNG THƯ SỐ X.509 & KHÓA KÝ (Phase 13.2.1)
+// -------------------------------------------------------------
 
+enum CertificateStatus {
+  ACTIVE
+  REVOKED
+  EXPIRED
+}
+
+enum KeyStorageType {
+  DEV_KEYSTORE
+  CLOUD_KMS
+  REMOTE_SMART_CA
+}
+
+model DigitalCertificate {
+  id                String            @id @default(uuid())
+  organizationId    String
+  userId            String?           // Null nếu là chứng thư / con dấu chung của tổ chức
+  subjectDn         String            // Ví dụ: "CN=Nguyễn Văn A, O=Tập đoàn VinaGroup, C=VN"
+  issuerDn          String            // Ví dụ: "CN=VinaGroup Internal Root CA, O=VinaGroup"
+  serialNumber      String            // Serial number theo X.509
+  fingerprintSha256 String            // SHA-256 fingerprint của certificate (Hex)
+  certificatePem    String            @db.Text // Nội dung chứng thư công khai dạng PEM
+  validFrom         DateTime
+  validTo           DateTime
+  status            CertificateStatus @default(ACTIVE)
+  revokedAt         DateTime?
+  revokedReason     String?
+  keyStorageType    KeyStorageType    @default(DEV_KEYSTORE)
+  keyAlias          String            // Định danh khóa trong KMS hoặc alias trong keystore
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  organization      Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user              User?             @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@unique([organizationId, fingerprintSha256])
+  @@unique([organizationId, keyAlias])
+  @@index([organizationId, status])
+  @@index([userId])
+  @@index([fingerprintSha256])
+  @@map("digital_certificates")
+}

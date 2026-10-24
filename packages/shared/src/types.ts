@@ -1,6 +1,8 @@
 import {
   ArtifactStatus,
   ArtifactType,
+  CertificateStatus,
+  KeyStorageType,
   AssigneeDecision,
   AssigneeRole,
   DocumentStatus,
@@ -170,5 +172,37 @@ export interface DocumentArtifactView {
   updatedAt: string;
   downloadUrl?: string;
 }
+
+export interface DigitalCertificateView {
+  id: string;
+  organizationId: string;
+  userId: string | null;
+  subjectDn: string;
+  issuerDn: string;
+  serialNumber: string;
+  fingerprintSha256: string;
+  certificatePem: string;
+  validFrom: string;
+  validTo: string;
+  status: CertificateStatus;
+  keyStorageType: KeyStorageType;
+  keyAlias: string;
+  createdAt: string;
+  updatedAt: string;
+  userFullName?: string | null;
+}
+
+export interface RegisterCertificateDto {
+  userId?: string | null;
+  certificatePem: string;
+  keyAlias: string;
+  keyStorageType?: KeyStorageType;
+}
+
+export interface UpdateCertificateStatusDto {
+  status: CertificateStatus;
+  reason?: string;
+}
+
 
 

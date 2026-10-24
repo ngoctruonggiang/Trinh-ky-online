@@ -2,6 +2,8 @@ import { PrismaClient } from '@prisma/client';
 import * as crypto from 'crypto';
 import { JwtUtil } from '../src/common/utils/jwt.util.js';
 import { UserRole } from '@trinh-ky/shared';
+import { DevKeystoreGenerator } from '../src/modules/signing/dev-keystore-generator.js';
+import { DevLocalKeystoreProvider } from '../src/modules/signing/providers/dev-local-keystore.provider.js';
 
 const API_BASE = 'http://localhost:4000/api';
 const JWT_SECRET = 'dev-jwt-secret-key-change-in-production-min-32-chars';
@@ -1483,10 +1485,202 @@ async function runLiveTests() {
   }
   console.log('   -> PASS (Tra cứu danh sách artifacts thành công)\n');
 
+  // =========================================================================
+  // --- BẮT ĐẦU KIỂM THỬ PHASE 13.2.1: CERTIFICATE REGISTRY & KEYSTORE ---
+  // =========================================================================
+  console.log('--- BẮT ĐẦU KIỂM THỬ PHASE 13.2.1: CERTIFICATE REGISTRY & SECURE KEYSTORE ---');
+
+  // Tạo và nạp tệp Keystore tự ký cho User A
+  const liveKeystoreProvider = new DevLocalKeystoreProvider();
+  const liveKeystoreUserA = DevKeystoreGenerator.generateSelfSignedKeystore({
+    commonName: userA.fullName,
+    organizationName: 'Tập đoàn VinaGroup (HQ)',
+  });
+  const keyAliasLiveA = `key_live_user_a_${Date.now()}`;
+  liveKeystoreProvider.importKeystore(keyAliasLiveA, liveKeystoreUserA.p12Buffer);
+
+  // Test 61: POST /api/certificates - Admin Alpha đăng ký chứng thư số cho User A
+  console.log('61. Test POST /api/certificates (ADMIN đăng ký chứng thư số công khai):');
+  const resRegCert = await fetch(`${API_BASE}/certificates`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenAdminA}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      userId: userA.id,
+      certificatePem: liveKeystoreUserA.certificatePem,
+      keyAlias: keyAliasLiveA,
+      keyStorageType: 'DEV_KEYSTORE',
+    }),
+  });
+  const bodyRegCert = await resRegCert.json();
+  const createdCert = bodyRegCert.data;
+  console.log(`   HTTP Status: ${resRegCert.status} | CertId: ${createdCert?.id} | Subject: ${createdCert?.subjectDn?.slice(0, 30)}...`);
+  if (resRegCert.status !== 201 || !createdCert?.id || createdCert.status !== 'ACTIVE') {
+    throw new Error(`Test 61 thất bại: Đăng ký chứng thư không thành công: ${JSON.stringify(bodyRegCert)}`);
+  }
+  console.log('   -> PASS (ADMIN đăng ký chứng thư số X.509 thành công với trạng thái ACTIVE)\n');
+
+  // Test 62: POST /api/certificates - USER thường bị chặn 403 Forbidden khi cố tự đăng ký
+  console.log('62. Test USER thường bị chặn 403 Forbidden khi cố đăng ký chứng thư số:');
+  const resUserRegCert = await fetch(`${API_BASE}/certificates`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenUserA}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      certificatePem: liveKeystoreUserA.certificatePem,
+      keyAlias: 'unauthorized_alias',
+    }),
+  });
+  console.log(`   HTTP Status: ${resUserRegCert.status}`);
+  if (resUserRegCert.status !== 403) {
+    throw new Error('Test 62 thất bại: Không chặn 403 khi USER thường cố đăng ký chứng thư');
+  }
+  console.log('   -> PASS (Bảo vệ phân quyền: Chỉ ADMIN mới được đăng ký chứng thư số)\n');
+
+  // Test 63: GET /api/certificates - Liệt kê danh mục chứng thư số
+  console.log('63. Test GET /api/certificates (Tra cứu danh sách chứng thư số theo tổ chức):');
+  const resListCerts = await fetch(`${API_BASE}/certificates`, {
+    headers: { Authorization: `Bearer ${tokenAdminA}` },
+  });
+  const bodyListCerts = await resListCerts.json();
+  console.log(`   HTTP Status: ${resListCerts.status} | Items: ${bodyListCerts.data?.length}`);
+  if (resListCerts.status !== 200 || !Array.isArray(bodyListCerts.data) || bodyListCerts.data.length === 0) {
+    throw new Error('Test 63 thất bại: Không liệt kê được danh sách chứng thư số');
+  }
+  console.log('   -> PASS (Liệt kê danh sách chứng thư số của tổ chức thành công)\n');
+
+  // Test 64: GET /api/certificates/:id - Xem chi tiết chứng thư bởi chính chủ User A
+  console.log('64. Test GET /api/certificates/:id (Chính chủ User A xem chi tiết chứng thư của mình):');
+  const resGetMyCert = await fetch(`${API_BASE}/certificates/${createdCert.id}`, {
+    headers: { Authorization: `Bearer ${tokenUserA}` },
+  });
+  const bodyGetMyCert = await resGetMyCert.json();
+  console.log(`   HTTP Status: ${resGetMyCert.status} | Fingerprint: ${bodyGetMyCert.data?.fingerprintSha256?.slice(0, 16)}...`);
+  if (resGetMyCert.status !== 200 || bodyGetMyCert.data?.id !== createdCert.id) {
+    throw new Error('Test 64 thất bại: Không xem được chứng thư của chính mình');
+  }
+  console.log('   -> PASS (Chính chủ xem chi tiết chứng thư cá nhân thành công)\n');
+
+  // Test 65: Cross-Tenant Protection: User B (Beta) cố đọc chứng thư của Alpha -> 403 Forbidden
+  console.log('65. Test Cross-Tenant Security: User B (Beta) cố truy cập chứng thư của Alpha:');
+  const resCrossCert = await fetch(`${API_BASE}/certificates/${createdCert.id}`, {
+    headers: { Authorization: `Bearer ${tokenUserB}` },
+  });
+  console.log(`   HTTP Status: ${resCrossCert.status}`);
+  if (resCrossCert.status !== 403) {
+    throw new Error('Test 65 thất bại: Không chặn 403 khi truy cập chứng thư của tổ chức khác');
+  }
+  console.log('   -> PASS (Chặn truy cập chéo tổ chức trên chứng thư số thành công với 403 Forbidden)\n');
+
+  // Test 66: POST /api/certificates/:id/test-sign - User A ký thử nghiệm và xác minh thành công
+  console.log('66. Test POST /api/certificates/:id/test-sign (Chính chủ User A thực thi ký thử nghiệm):');
+  const resTestSign = await fetch(`${API_BASE}/certificates/${createdCert.id}/test-sign`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${tokenUserA}` },
+  });
+  const bodyTestSign = await resTestSign.json();
+  console.log(`   HTTP Status: ${resTestSign.status} | Data Sig Valid: ${bodyTestSign.data?.dataSignatureValid} | Digest Sig Valid: ${bodyTestSign.data?.digestSignatureValid}`);
+  if (
+    resTestSign.status !== 200 ||
+    !bodyTestSign.data?.dataSignatureValid ||
+    !bodyTestSign.data?.digestSignatureValid
+  ) {
+    throw new Error(`Test 66 thất bại: Thử nghiệm ký số không thành công: ${JSON.stringify(bodyTestSign)}`);
+  }
+  console.log('   -> PASS (Ký thử nghiệm thành công: Chữ ký số khớp 100% với khóa công khai X.509)\n');
+
+  // Test 67: Cross-Tenant Test-Sign: User B (Beta) cố tình gọi test-sign trên chứng thư của Alpha -> 403
+  console.log('67. Test Cross-Tenant Test-Sign: User B (Beta) cố dùng chứng thư Alpha để ký:');
+  const resCrossTestSign = await fetch(`${API_BASE}/certificates/${createdCert.id}/test-sign`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${tokenUserB}` },
+  });
+  console.log(`   HTTP Status: ${resCrossTestSign.status}`);
+  if (resCrossTestSign.status !== 403) {
+    throw new Error('Test 67 thất bại: Không chặn 403 khi gọi test-sign xuyên tổ chức');
+  }
+  console.log('   -> PASS (Chặn tuyệt đối hành vi ký số xuyên tổ chức)\n');
+
+  // Test 68: User Privacy / Attribution: User khác trong cùng tổ chức cố dùng cert của User A để ký -> 403
+  console.log('68. Test User Privacy: Người khác trong cùng công ty cố ký bằng chứng thư của User A:');
+  let anotherUserA = await prisma.user.findFirst({
+    where: { organizationId: userA.organizationId, id: { not: userA.id }, role: 'USER' },
+  });
+  if (!anotherUserA) {
+    anotherUserA = await prisma.user.create({
+      data: {
+        email: `colleague-a-${Date.now()}@vinagroup.vn`,
+        passwordHash: 'dummy_hash',
+        fullName: 'Đồng nghiệp cùng công ty',
+        role: 'USER',
+        organizationId: userA.organizationId,
+      },
+    });
+  }
+  const tokenAnotherUserA = JwtUtil.sign(
+    {
+      sub: anotherUserA.id,
+      email: anotherUserA.email,
+      fullName: anotherUserA.fullName,
+      role: anotherUserA.role,
+      organizationId: anotherUserA.organizationId,
+    },
+    JWT_SECRET,
+    3600
+  );
+
+  const resColleagueSign = await fetch(`${API_BASE}/certificates/${createdCert.id}/test-sign`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${tokenAnotherUserA}` },
+  });
+  console.log(`   HTTP Status: ${resColleagueSign.status}`);
+  if (resColleagueSign.status !== 403) {
+    throw new Error('Test 68 thất bại: Không chặn 403 khi đồng nghiệp cố dùng cert cá nhân của người khác');
+  }
+  console.log('   -> PASS (Bảo vệ chữ ký cá nhân: Chặn người dùng khác ký mạo danh thành công)\n');
+
+  // Test 69: PATCH /api/certificates/:id/status - Admin thu hồi chứng thư (REVOKED)
+  console.log('69. Test PATCH /api/certificates/:id/status (ADMIN thu hồi chứng thư số):');
+  const resRevoke = await fetch(`${API_BASE}/certificates/${createdCert.id}/status`, {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${tokenAdminA}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      status: 'REVOKED',
+      reason: 'Thu hồi thử nghiệm bảo mật trong Live HTTP Test',
+    }),
+  });
+  const bodyRevoke = await resRevoke.json();
+  console.log(`   HTTP Status: ${resRevoke.status} | Status: ${bodyRevoke.data?.status} | Reason: ${bodyRevoke.data?.revokedReason}`);
+  if (resRevoke.status !== 200 || bodyRevoke.data?.status !== 'REVOKED') {
+    throw new Error('Test 69 thất bại: Không cập nhật trạng thái thu hồi chứng thư');
+  }
+  console.log('   -> PASS (Thu hồi chứng thư số thành công qua Live HTTP)\n');
+
+  // Test 70: Chặn ký số khi chứng thư đã bị thu hồi (REVOKED) -> 400 Bad Request
+  console.log('70. Test Chặn ký số khi chứng thư đã bị thu hồi (Chặn 400):');
+  const resSignRevoked = await fetch(`${API_BASE}/certificates/${createdCert.id}/test-sign`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${tokenUserA}` },
+  });
+  const bodySignRevoked = await resSignRevoked.json();
+  console.log(`   HTTP Status: ${resSignRevoked.status} | Error: ${bodySignRevoked.error?.message}`);
+  if (resSignRevoked.status !== 400) {
+    throw new Error('Test 70 thất bại: Không chặn 400 khi ký bằng chứng thư bị thu hồi');
+  }
+  console.log('   -> PASS (Chặn hoàn toàn hành vi ký bằng chứng thư bị thu hồi)\n');
+
   await prisma.$disconnect();
   console.log('========================================================================');
-  console.log('🎉 TẤT CẢ 60/60 KỊCH BẢN KIỂM THỬ LIVE HTTP & SECURITY TRÊN POSTGRESQL');
-  console.log('   (BAO GỒM REASSIGNMENT, SLA SCHEDULER, NOTIFICATION, DELEGATION VÀ PHASE 13.1 PDF ARTIFACT STORAGE)');
+  console.log('🎉 TẤT CẢ 70/70 KỊCH BẢN KIỂM THỬ LIVE HTTP & SECURITY TRÊN POSTGRESQL');
+  console.log('   (BAO GỒM REASSIGNMENT, SLA SCHEDULER, NOTIFICATION, DELEGATION,');
+  console.log('    PHASE 13.1 PDF ARTIFACT STORAGE VÀ PHASE 13.2.1 CERTIFICATE KEYSTORE)');
   console.log('   ĐÃ PASS 100%!');
   console.log('========================================================================');
 }

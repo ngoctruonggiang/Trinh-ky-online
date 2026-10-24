@@ -182,7 +182,36 @@ Hai yêu cầu ký gửi lên cùng một lúc (người dùng double click, m�
 2. **Khóa Lạc quan FSM (Optimistic Concurrency Control):**
    - Sử dụng trường `version` trong bảng `approval_steps` và `approval_workflows`. Chỉ bước nào đang ở `IN_PROGRESS` mới được thực hiện ký. Request thứ hai đến sẽ thấy bước đã chuyển sang `COMPLETED` và trả về ngay kết quả đã ký từ trước mà không thực hiện ký lại.
 3. **Idempotency Key:**
-   - Client gửi `idempotencyKey` trong header hoặc payload. Backend lưu cache kết quả xử lý trong 60 giây. Nếu nhận được cùng một key, trả về ngay kết quả đã lưu.
+---
+
+## ADR-08: NGỮ NGHĨA KÝ SỐ VÀ KHÔNG XUẤT KHÓA RIÊNG (SIGNING INPUT SEMANTICS & NO PRIVATE KEY EXPORT)
+
+### Bối cảnh & Vấn đề
+Nhiều hệ thống ký số gặp lỗi khi tích hợp Remote HSM/KMS do API ký không phân định rõ đầu vào là dữ liệu thô, pre-computed digest hay ASN.1 DigestInfo, dẫn đến băm 2 lần (Double Hashing) hoặc định dạng chữ ký không tương thích với RFC 3447 (RSASSA-PKCS1-v1_5). Ngoài ra, nếu interface trả về private key object, rủi ro lộ khóa trên tầng ứng dụng là rất cao.
+
+### Quyết định
+1. **Tuyệt đối không export Private Key**: Interface `ISigningKeyProvider` không cung cấp bất kỳ hàm nào trả về `KeyObject`, `Buffer` hay chuỗi PEM của khóa riêng.
+2. **Chuẩn hóa Ngữ nghĩa Đầu vào (Input Semantics)**:
+   - `signData(keyAlias, rawData)`: Nhận dữ liệu thô bất kỳ $\rightarrow$ Băm SHA-256 $\rightarrow$ Ký RSASSA-PKCS1-v1_5.
+   - `signDigest(keyAlias, digest32Bytes)`: Nhận đúng 32-byte SHA-256 hash $\rightarrow$ Bọc ASN.1 `DigestInfo` tiền tố SHA-256 (`3031300d060960864801650304020105000420`) $\rightarrow$ Mã hóa khóa riêng với `RSA_PKCS1_PADDING`.
+   - Cả hai phương thức tạo ra chữ ký có cùng định dạng, tương thích 100% với `crypto.verify('sha256', ...)`.
+3. **Sẵn sàng cho Remote KMS/HSM**: Khi chuyển sang AWS KMS hoặc Google Cloud KMS, phương thức `signDigest` chỉ cần chuyển tiếp 32 byte băm lên KMS API với tham số `MessageType: 'DIGEST'` và `SigningAlgorithm: 'RSASSA_PKCS1_V1_5_SHA_256'`, không cần tải tệp PDF dung lượng lớn lên cloud.
+
+---
+
+## ADR-09: QUẢN LÝ DANH MỤC CHỨNG THƯ X.509 VÀ PHÂN QUYỀN SỞ HỮU
+
+### Bối cảnh & Vấn đề
+Nếu không có bảng quản lý chứng thư tập trung, hệ thống khó theo dõi trạng thái thu hồi, phân định giữa chứng thư cá nhân và chứng thư đại diện tổ chức, hoặc dễ bị lỗ hổng khi client tự gửi keyAlias hoặc cert ID của tổ chức khác.
+
+### Quyết định
+1. **Mô hình Dữ liệu `DigitalCertificate`**:
+   - Lưu trữ fingerprint SHA-256 (unique), serial number, subject/issuer DN, validFrom, validTo, status (`ACTIVE`, `REVOKED`, `EXPIRED`), keyStorageType, keyAlias, và certificatePem công khai.
+   - Không lưu khóa riêng hay mật khẩu keystore trong bảng này.
+2. **Phân quyền và Ranh giới Sở hữu**:
+   - Chỉ `ADMIN` và `SUPER_ADMIN` mới được phép đăng ký (`POST /api/certificates`) hoặc thu hồi (`PATCH /api/certificates/:id/status`).
+   - `USER` chỉ được xem và ký thử nghiệm trên chứng thư cá nhân gán cho chính mình (`userId === currentUser.id`).
+   - Cấm hoàn toàn việc thay đổi `organizationId` hoặc `userId` sau khi chứng thư đã tạo.
 
 ---
 
@@ -197,3 +226,5 @@ Hai yêu cầu ký gửi lên cùng một lúc (người dùng double click, m�
 | **ADR-05** | Lưu trữ & Toàn vẹn | Chuỗi 3-Tier Hash (`formData` $\rightarrow$ `rawPdf` $\rightarrow$ `signedPdf`) | **APPROVED** |
 | **ADR-06** | Xác minh độc lập | Tương thích Adobe Acrobat Reader + Independent CLI + Public Verify API | **APPROVED** |
 | **ADR-07** | Chống ký lặp | Advisory Locks + OCC + Idempotency Keys | **APPROVED** |
+| **ADR-08** | Ngữ nghĩa Ký số | Không export Private Key, chuẩn hóa `signData` vs `signDigest` | **APPROVED** |
+| **ADR-09** | Danh mục Chứng thư | Phân quyền Tenant/User, bất biến quyền sở hữu, kiểm soát thu hồi | **APPROVED** |

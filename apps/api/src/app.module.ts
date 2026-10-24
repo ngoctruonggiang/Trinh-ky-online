@@ -6,6 +6,7 @@ import { WorkflowTemplateModule } from './modules/workflow-template/workflow-tem
 import { NotificationModule } from './modules/notification/notification.module.js';
 import { DelegationModule } from './modules/delegation/delegation.module.js';
 import { ArtifactModule } from './modules/artifact/artifact.module.js';
+import { SigningModule } from './modules/signing/signing.module.js';
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { ArtifactModule } from './modules/artifact/artifact.module.js';
     NotificationModule,
     DelegationModule,
     ArtifactModule,
+    SigningModule,
   ],
 })
 export class AppModule {}
