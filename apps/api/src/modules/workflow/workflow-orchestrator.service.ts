@@ -20,6 +20,7 @@ import {
   DefaultWorkflowStep,
   WorkflowStepConfig,
   canonicalizeJson,
+  UserRole,
 } from '@trinh-ky/shared';
 import {
   WorkflowFSM,
@@ -850,29 +851,106 @@ export class WorkflowOrchestratorService {
    */
   public async reconcileUnsealedApprovedDocument(
     documentId: string,
-    actor: UserPrincipal
+    actor: UserPrincipal,
+    metadata?: { ipAddress?: string; userAgent?: string }
   ) {
+    if (!this.pdfSigningService) {
+      throw new InternalServerErrorException('Dịch vụ ký số PDF chưa được tích hợp');
+    }
+
     const document = await this.prisma.document.findUnique({
       where: { id: documentId },
+      include: {
+        workflow: true,
+        versions: {
+          orderBy: { versionNumber: 'desc' },
+        },
+      },
     });
 
     if (!document) {
       throw new NotFoundException('Hồ sơ không tồn tại');
     }
 
-    if (document.organizationId !== actor.organizationId) {
+    // 1. Ranh giới Multi-Company Tenant Boundary
+    if (
+      actor.role !== UserRole.SUPER_ADMIN &&
+      actor.organizationId &&
+      document.organizationId &&
+      document.organizationId !== actor.organizationId
+    ) {
       throw new ForbiddenException('Không có quyền truy cập hồ sơ của tổ chức khác');
     }
 
+    // 2. Phân quyền vai trò: Chỉ tác giả hồ sơ, Company Admin cùng công ty, hoặc Super Admin
+    const isCreator = document.createdById === actor.id;
+    const isSuperAdmin = actor.role === UserRole.SUPER_ADMIN;
+    const isCompanyAdmin =
+      actor.role === UserRole.ADMIN &&
+      (!document.organizationId || actor.organizationId === document.organizationId);
+
+    if (!isCreator && !isSuperAdmin && !isCompanyAdmin) {
+      throw new ForbiddenException(
+        'Bạn không có quyền thực hiện đối soát và niêm phong số cho hồ sơ này.'
+      );
+    }
+
+    // 3. Trạng thái hồ sơ và quy trình phê duyệt
     if (document.status !== DocumentStatus.APPROVED) {
-      throw new BadRequestException('Chỉ có thể niêm phong số cho hồ sơ đã hoàn tất phê duyệt (APPROVED)');
+      throw new BadRequestException(
+        'Chỉ có thể niêm phong số cho hồ sơ đã hoàn tất phê duyệt (APPROVED)'
+      );
     }
 
-    if (!this.pdfSigningService) {
-      throw new InternalServerErrorException('Dịch vụ ký số PDF chưa được tích hợp');
+    if (document.workflow && document.workflow.status !== WorkflowStatus.COMPLETED) {
+      throw new BadRequestException(
+        'Quy trình phê duyệt chưa hoàn tất (Workflow status must be COMPLETED)'
+      );
     }
 
-    return await this.pdfSigningService.autoSealApprovedDocument(documentId, actor);
+    // 4. Kiểm tra tính toàn vẹn của phiên bản tài liệu được duyệt
+    const activeVersion =
+      document.versions?.find((v) => v.versionNumber === document.currentVersion) ||
+      document.versions?.[0];
+
+    if (!activeVersion) {
+      throw new BadRequestException('Không tìm thấy phiên bản phê duyệt của tài liệu');
+    }
+
+    const computedHash = this.computeContentHash(activeVersion.formData);
+    if (computedHash !== activeVersion.sha256Hash) {
+      throw new BadRequestException(
+        'Nội dung tài liệu khác với phiên bản đã phê duyệt: mã băm dữ liệu không khớp với bản ghi toàn vẹn.'
+      );
+    }
+
+    // 5. Thực hiện tự động niêm phong số qua PdfSigningService (Đã có advisory lock serialize & Idempotency)
+    const signResult = await this.pdfSigningService.autoSealApprovedDocument(documentId, actor);
+    if (!signResult) {
+      throw new InternalServerErrorException(
+        'Không tìm thấy chứng thư số niêm phong hợp lệ của tổ chức hoặc khóa ký chưa sẵn sàng'
+      );
+    }
+
+    // 6. Ghi nhận Audit Log sự kiện Reconciliation
+    await this.prisma.auditLog.create({
+      data: {
+        documentId,
+        userId: actor.id,
+        action: AuditAction.DOCUMENT_RECONCILE_SEAL || 'DOCUMENT_RECONCILE_SEAL',
+        ipAddress: metadata?.ipAddress,
+        details: {
+          artifactId: signResult.artifactId,
+          versionNumber: activeVersion.versionNumber,
+          signedPdfHash: signResult.signedPdfHash,
+          padesLevel: signResult.padesLevel,
+          status: signResult.status,
+          reconciledAt: new Date().toISOString(),
+        },
+      },
+    });
+
+    return signResult;
   }
 
   /**

@@ -17,7 +17,11 @@ import {
   SignDigestOptions,
   SigningAlgorithm,
   SigningResult,
-} from './signing-key-provider.interface';
+} from './signing-key-provider.interface.js';
+import {
+  ensureAndVerifyDirectory,
+  getKeystoreStorageDir,
+} from '../../artifact/storage/storage-path.util.js';
 
 // ASN.1 DER prefix cho SHA-256 DigestInfo theo chuẩn PKCS#1 v1.5 (RFC 8017 / ISO 32000)
 // Sequence { AlgorithmIdentifier: 2.16.840.1.101.3.4.2.1 (id-sha256), NULL, OCTET STRING (32 bytes) }
@@ -44,11 +48,9 @@ export class DevLocalKeystoreProvider implements ISigningKeyProvider {
   private readonly passphraseCache = new Map<string, string>();
 
   constructor() {
-    // Thư mục lưu trữ keystore cục bộ nằm ngoài public web root
-    this.keystoreDir = path.resolve(process.cwd(), 'storage', 'keystores', 'dev');
-    if (!fs.existsSync(this.keystoreDir)) {
-      fs.mkdirSync(this.keystoreDir, { recursive: true });
-    }
+    // Thư mục lưu trữ keystore cục bộ duy nhất, phân giải tuyệt đối từ Canonical Storage Root
+    this.keystoreDir = getKeystoreStorageDir();
+    ensureAndVerifyDirectory(this.keystoreDir);
 
     // Passphrase cấu hình qua biến môi trường (fallback chỉ áp dụng cho local dev)
     this.defaultPassphrase =
@@ -69,22 +71,6 @@ export class DevLocalKeystoreProvider implements ISigningKeyProvider {
     const resolved = path.resolve(this.keystoreDir, `${keyAlias}.p12`);
     if (!resolved.startsWith(this.keystoreDir)) {
       throw new BadRequestException('Phát hiện hành vi Path Traversal trái phép.');
-    }
-
-    if (!fs.existsSync(resolved)) {
-      // Hỗ trợ kiểm thử liên tiến trình khi server và test runner chạy từ các cwd khác nhau (apps/api vs monorepo root)
-      const altDirs = [
-        path.resolve(process.cwd(), 'apps', 'api', 'storage', 'keystores', 'dev'),
-        path.resolve(process.cwd(), 'storage', 'keystores', 'dev'),
-        path.resolve(process.cwd(), '..', 'storage', 'keystores', 'dev'),
-        path.resolve(process.cwd(), '..', 'apps', 'api', 'storage', 'keystores', 'dev'),
-      ];
-      for (const altDir of altDirs) {
-        const altPath = path.resolve(altDir, `${keyAlias}.p12`);
-        if (fs.existsSync(altPath)) {
-          return altPath;
-        }
-      }
     }
 
     return resolved;
@@ -234,23 +220,6 @@ export class DevLocalKeystoreProvider implements ISigningKeyProvider {
     const tempPath = `${targetPath}.tmp_${Date.now()}`;
     fs.writeFileSync(tempPath, p12Buffer, { mode: 0o600 });
     fs.renameSync(tempPath, targetPath);
-
-    // Đồng bộ sang thư mục tương đương nếu chạy trong môi trường monorepo
-    const altTargetPaths = [
-      path.resolve(process.cwd(), 'apps', 'api', 'storage', 'keystores', 'dev', `${keyAlias}.p12`),
-      path.resolve(process.cwd(), '..', 'storage', 'keystores', 'dev', `${keyAlias}.p12`),
-      path.resolve(process.cwd(), 'storage', 'keystores', 'dev', `${keyAlias}.p12`),
-    ];
-    for (const altPath of altTargetPaths) {
-      try {
-        const altDir = path.dirname(altPath);
-        if (fs.existsSync(altDir) && altPath !== targetPath) {
-          fs.writeFileSync(altPath, p12Buffer, { mode: 0o600 });
-        }
-      } catch {
-        // Ignore fallback sync errors
-      }
-    }
 
     if (passphrase) {
       this.passphraseCache.set(keyAlias, passphrase);

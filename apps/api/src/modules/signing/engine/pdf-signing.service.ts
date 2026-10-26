@@ -4,6 +4,7 @@ import {
   Inject,
   Injectable,
   InternalServerErrorException,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import * as crypto from 'crypto';
@@ -34,6 +35,8 @@ import { PdfSignatureVerifier } from './pdf-signature.verifier.js';
 
 @Injectable()
 export class PdfSigningService {
+  private readonly logger = new Logger(PdfSigningService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly storageService: StorageService,
@@ -776,9 +779,15 @@ export class PdfSigningService {
     });
 
     if (existingSignedArtifact) {
-      return {
-        artifactId: existingSignedArtifact.id,
-        documentId: document.id,
+      let physicalFileExists = false;
+      if (existingSignedArtifact.storageKey) {
+        physicalFileExists = await this.storageService.exists(existingSignedArtifact.storageKey);
+      }
+
+      if (physicalFileExists) {
+        return {
+          artifactId: existingSignedArtifact.id,
+          documentId: document.id,
         documentVersionId: existingSignedArtifact.documentVersionId,
         status: ArtifactStatus.COMPLETED,
         signedPdfHash: existingSignedArtifact.signedPdfHash || '',
@@ -807,6 +816,10 @@ export class PdfSigningService {
         downloadUrl: `/api/documents/${document.id}/pdf?type=SIGNED_PDF`,
       };
     }
+    this.logger.warn(
+      `Artifact ${existingSignedArtifact.id} ghi nhận trạng thái COMPLETED nhưng tệp ${existingSignedArtifact.storageKey} không tồn tại trên storage. Tiến hành tái ký phục hồi.`
+    );
+  }
 
     const now = new Date();
 

@@ -679,7 +679,7 @@ describe('Phase 13.4: Workflow Auto-Signing Integration & Production Readiness (
       },
     });
 
-    // Thực hiện Reconciliation thông qua orchestratorService
+    // 1. Chặn nhân viên/người duyệt thông thường không phải tác giả hay admin (ForbiddenException)
     const principalApproverNoCert: UserPrincipal = {
       id: approverNoCert.id,
       email: approverNoCert.email,
@@ -689,9 +689,26 @@ describe('Phase 13.4: Workflow Auto-Signing Integration & Production Readiness (
       departmentId: null,
     };
 
+    await expect(
+      orchestratorService.reconcileUnsealedApprovedDocument(
+        unsealedDoc!.id,
+        principalApproverNoCert
+      )
+    ).rejects.toThrow(ForbiddenException);
+
+    // 2. Tác giả hồ sơ (creatorNoCert) thực hiện Reconciliation thành công
+    const principalCreatorNoCert: UserPrincipal = {
+      id: creatorNoCert.id,
+      email: creatorNoCert.email,
+      fullName: creatorNoCert.fullName,
+      role: UserRole.USER,
+      organizationId: orgNoCert.id,
+      departmentId: null,
+    };
+
     const reconcileResult = await orchestratorService.reconcileUnsealedApprovedDocument(
       unsealedDoc!.id,
-      principalApproverNoCert
+      principalCreatorNoCert
     );
 
     expect(reconcileResult).toBeDefined();

@@ -123,7 +123,7 @@ export class DocumentWorkflowController {
   private async verifyDocumentAccess(
     documentId: string,
     user: UserPrincipal,
-    action: 'submit' | 'resubmit' | 'cancel' | 'decision' = 'submit'
+    action: 'submit' | 'resubmit' | 'cancel' | 'decision' | 'reconcile' = 'submit'
   ) {
     const document = await this.prisma.document.findUnique({
       where: { id: documentId },
@@ -336,9 +336,16 @@ export class DocumentWorkflowController {
   @HttpCode(HttpStatus.OK)
   async reconcileSeal(
     @Param('id') id: string,
-    @CurrentUser() user: UserPrincipal
+    @CurrentUser() user: UserPrincipal,
+    @Req() req: HttpRequest
   ) {
-    const result = await this.orchestrator.reconcileUnsealedApprovedDocument(id, user);
+    // Xác minh quyền: Chỉ tác giả hoặc Admin công ty sở hữu mới được reconcile
+    await this.verifyDocumentAccess(id, user, 'reconcile');
+
+    const result = await this.orchestrator.reconcileUnsealedApprovedDocument(id, user, {
+      ipAddress: req.ip,
+      userAgent: this.getUserAgent(req),
+    });
     return {
       success: true,
       data: result,
