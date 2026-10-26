@@ -9,6 +9,8 @@ import { SIGNING_KEY_PROVIDER } from './providers/signing-key-provider.interface
 import { ArtifactModule } from '../artifact/artifact.module.js';
 import { PdfSigningService } from './engine/pdf-signing.service.js';
 import { TimestampService } from './timestamp/timestamp.service.js';
+import { RevocationService } from './revocation/revocation.service.js';
+import { PdfDssService } from './dss/pdf-dss.service.js';
 
 @Module({
   imports: [ArtifactModule],
@@ -19,6 +21,8 @@ import { TimestampService } from './timestamp/timestamp.service.js';
     DevLocalKeystoreProvider,
     CloudKmsSigningProvider,
     TimestampService,
+    RevocationService,
+    PdfDssService,
     PdfSigningService,
     {
       provide: SIGNING_KEY_PROVIDER,
@@ -30,6 +34,8 @@ import { TimestampService } from './timestamp/timestamp.service.js';
     DevLocalKeystoreProvider,
     CloudKmsSigningProvider,
     TimestampService,
+    RevocationService,
+    PdfDssService,
     PdfSigningService,
     SIGNING_KEY_PROVIDER,
   ],

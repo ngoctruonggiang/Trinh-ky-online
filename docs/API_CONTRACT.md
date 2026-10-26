@@ -334,13 +334,33 @@ Truy vấn toàn bộ dữ liệu hồ sơ, phiên bản biểu mẫu, tiến tr
     },
     "decisionHistories": [],
     "signatures": [],
+    "signedPdfArtifact": {
+      "id": "art-signed-001",
+      "signedPdfHash": "a8f3b2c1d0e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0",
+      "rawPdfHash": "1348c7f51924d979b0e123456789abcdef0123456789abcdef0123456789abcd",
+      "signerName": "Con dấu Điện tử VinaGroup HQ",
+      "signerSubject": "CN=Con dau Dien tu Tap doan VinaGroup, O=VinaGroup, C=VN",
+      "signingTime": "2026-10-26T04:30:00.000Z",
+      "hasTimestamp": true,
+      "timestampGenTime": "2026-10-26T04:30:00.500Z",
+      "tsaSubject": "CN=Trinh Ky Online Internal Trusted TSA, O=Trinh Ky Online PKI Lab, C=VN",
+      "hasLtv": true,
+      "ltvStatus": "VALID",
+      "dssCertsCount": 3,
+      "dssOcspsCount": 2,
+      "dssCrlsCount": 0,
+      "ltvEmbeddedAt": "2026-10-26T04:30:01.000Z",
+      "padesLevel": "PADES_B_LT",
+      "downloadUrl": "/api/documents/doc-001/pdf?type=SIGNED_PDF",
+      "verifyLtvUrl": "/api/documents/doc-001/verify-ltv"
+    },
     "permissions": {
-      "canApprove": true,
+      "canApprove": false,
       "canResubmit": false,
       "canCancel": false,
       "isCreator": false,
       "isAdmin": false,
-      "currentStepAssigneeRole": "APPROVER"
+      "currentStepAssigneeRole": null
     }
   },
   "timestamp": "2026-10-21T10:15:00.000Z"
@@ -1640,5 +1660,113 @@ Phần này quy định các giao ước API phục vụ việc kết xuất PDF
 - Dấu thời gian RFC 3161 (`id-aa-signatureTimeStampToken`) chứng minh sự tồn tại của chữ ký người ký trước thời điểm `genTime`.
 - Hệ thống hỗ trợ kiểm tra fail-closed: nếu `requireTimestamp: true` mà TSA không sẵn sàng hoặc token bị lỗi, giao dịch ký lập tức bị hủy bỏ, không fallback sang đồng hồ hệ thống nội bộ.
 - Hệ thống KHÔNG tự động tuyên bố đạt giá trị pháp lý tương đương chữ ký số công cộng quốc gia nếu chứng thư số chưa thuộc danh mục CA tin cậy quốc gia (Bộ TT&TT).
+
+---
+
+### 10.14. Bổ sung thông tin xác thực dài hạn LTV (Phase 13.3.2 — Add LTV to Signed Document)
+- **Endpoint:** `POST /api/documents/:id/add-ltv`
+- **Quyền hạn:** `USER` (thuộc cùng tổ chức sở hữu hồ sơ), `ADMIN`, `SUPER_ADMIN`. Chặn `403 Forbidden` đối với Tenant khác.
+- **Request Body (JSON, tùy chọn):**
+  ```json
+  {
+    "versionNumber": 1
+  }
+  ```
+- **Hành vi nghiệp vụ:**
+  - Nạp bản nhị phân `SIGNED_PDF` hiện có từ Storage.
+  - Tự động thẩm định tính toàn vẹn chữ ký hiện tại (Revision 1 ByteRange).
+  - Trích xuất chứng thư số người ký và chứng thư TSA (nếu có).
+  - Thu thập chuỗi chứng thư số tin cậy (Certificate Chain) và dữ liệu thu hồi (Revocation Info): phản hồi OCSP (RFC 6960) và danh sách thu hồi CRL (RFC 5280) với cơ chế phòng thủ SSRF nhiều lớp (chặn IP private/loopback/link-local/cloud metadata, giới hạn kích thước và timeout).
+  - Đóng gói từ điển `/DSS` (Document Security Store) và `/VRI` (Validation-Related Information) vào PDF thông qua kỹ thuật **PDF Incremental Update** chuẩn ISO 32000-1 clause 12.8.4 và ETSI EN 319 142-1 clause 5.4.
+  - Tuyệt đối bảo toàn nguyên vẹn byte và ByteRange của Revision 1; chữ ký ban đầu không bị vô hiệu hóa.
+  - Cơ chế **Fail-Closed**: nếu phát hiện chứng thư số bị thu hồi (`REVOKED`), hệ thống lập tức từ chối nhúng DSS và không cấp chứng nhận B-LT.
+  - Ghi nhật ký kiểm toán `DOCUMENT_ADD_LTV`.
+- **Response Thành công (HTTP 200 OK / 201 Created):**
+  ```json
+  {
+    "success": true,
+    "data": {
+      "artifactId": "d1201130-ee7e-4d5e-81a5-512deb04f505",
+      "documentId": "3be537ee-6d3f-4ccb-9c23-6cc2c83c94b3",
+      "documentVersionId": "f98a4031-a160-4ad8-a168-e2d6956745f2",
+      "signedPdfHash": "c1f7a294b05e...",
+      "sizeBytes": 1186867,
+      "hasLtv": true,
+      "ltvStatus": "VALID",
+      "padesLevel": "PADES_B_LT",
+      "dssCertsCount": 3,
+      "dssOcspsCount": 2,
+      "dssCrlsCount": 0,
+      "embeddedAt": "2026-10-26T02:40:04.221Z",
+      "downloadUrl": "/api/documents/3be537ee-6d3f-4ccb-9c23-6cc2c83c94b3/pdf?type=SIGNED_PDF"
+    },
+    "timestamp": "2026-10-26T02:40:05.000Z"
+  }
+  ```
+
+---
+
+### 10.15. Thẩm định chuyên biệt dữ liệu LTV / DSS (Phase 13.3.2 — Verify LTV)
+- **Endpoint:** `GET /api/documents/:id/verify-ltv`
+- **Query Parameters:** `version` (tùy chọn, mặc định là phiên bản hiện tại).
+- **Quyền hạn:** `USER` (cùng tổ chức), `ADMIN`, `SUPER_ADMIN`. Chặn `403 Forbidden` đối với Tenant khác.
+- **Hành vi nghiệp vụ:**
+  - Trích xuất cấu trúc `/DSS` từ bản cập nhật bổ sung cuối cùng của tệp PDF.
+  - Kiểm tra và giải mã danh sách luồng nhị phân X.509 Certificates (`/Certs`), OCSP Responses (`/OCSPs`), và CRLs (`/CRLs`).
+  - Đối soát chữ ký số trên OCSP Response / CRL với khóa công khai của CA phát hành.
+  - Xác nhận chứng thư của người ký có trạng thái `GOOD` tại thời điểm ký và dấu thời gian.
+- **Response Thành công (HTTP 200 OK):**
+  ```json
+  {
+    "success": true,
+    "data": {
+      "hasLtv": true,
+      "ltvValidationStatus": "VALID",
+      "padesLevel": "PADES_B_LT",
+      "revocationStatus": "GOOD",
+      "dssInfo": {
+        "certsCount": 3,
+        "ocspsCount": 2,
+        "crlsCount": 0,
+        "vriEntriesCount": 1
+      },
+      "signatureIntegrity": true,
+      "hasTimestamp": true,
+      "isTimestampValid": true
+    },
+    "timestamp": "2026-10-26T02:40:06.000Z"
+  }
+  ```
+
+---
+
+### 10.16. Ranh giới Kỹ thuật PAdES B-LT vs PAdES B-LTA
+- **PAdES Baseline B-LT (Triển khai hoàn tất trong Phase 13.3.2):**
+  - Tệp PDF chứa chữ ký số (B-B), TimeStampToken RFC 3161 trên chữ ký (B-T), và toàn bộ chứng thư số trong chuỗi chứng thực cùng dữ liệu xác minh trạng thái thu hồi (OCSP Responses / CRLs) được nhúng trong từ điển Document Security Store (`/DSS`).
+  - Cho phép người nhận thẩm định chữ ký trong tương lai độc lập với tính sẵn sàng của máy chủ OCSP/CRL bên ngoài tại thời điểm thẩm định.
+- **PAdES Baseline B-LTA (Phạm vi tương lai):**
+  - Bổ sung cơ chế **Document Timestamp** định kỳ bao trùm toàn bộ tệp PDF (bao gồm cả dữ liệu DSS hiện có) nhằm chống lại sự suy giảm thuật toán mật mã theo thời gian (cryptographic decay).
+  - Không công bố đạt B-LTA khi chưa triển khai Document Timestamp bảo vệ chứng cứ dài hạn.
+
+---
+
+### 10.17. Tự động Niêm phong số PAdES B-LT & Tích hợp Luồng Phê duyệt (Phase 13.4)
+- **Cơ chế Kích hoạt (Trigger):**
+  - Khi một hồ sơ hoàn tất bước phê duyệt cuối cùng và FSM chuyển trạng thái tài liệu sang `APPROVED`, `WorkflowOrchestratorService` tự động gọi `PdfSigningService.autoSealApprovedDocument(documentId, actor)`.
+  - **Lựa chọn Chứng thư số Niêm phong:**
+    1. Ưu tiên con dấu điện tử chung của tổ chức (`DigitalCertificate` có `organizationId` khớp và `userId: null`, trạng thái `ACTIVE`).
+    2. Nếu tổ chức chưa nạp con dấu chung, hệ thống sử dụng chứng thư cá nhân `ACTIVE` của người phê duyệt bước cuối cùng (`actor.id`).
+    3. Nếu cả tổ chức và người phê duyệt đều chưa cấu hình chứng thư số PKI, hệ thống **hoạt động êm thuận (Graceful Fallback)**: giao dịch duyệt hồ sơ hoàn tất thành công (`APPROVED`), ghi nhận log cảnh báo và không ném lỗi ra ngoài client.
+- **Tham số Ký số Bắt buộc:**
+  - `requireTimestamp: true` (Yêu cầu dấu thời gian RFC 3161 từ TSA tin cậy).
+  - `includeLtv: true` (Yêu cầu bổ sung dữ liệu xác thực dài hạn DSS / VRI / OCSP / CRL).
+  - Kết quả sinh ra tệp `SIGNED_PDF` đạt chuẩn **PAdES Baseline B-LT**.
+- **Liên kết Ủy quyền & Đa Chữ ký (Delegation & Multi-Signer Linkage):**
+  - Khi người phê duyệt thực hiện duyệt thay mặt người khác thông qua chính sách ủy quyền (`isDelegated: true`), bản ghi kiểm toán chữ ký số `DOCUMENT_SIGN_PDF` và sự kiện `StepDecisionHistory` liên kết chặt chẽ: `userId` (người thực hiện), `delegatedFromUserId` (người ủy quyền), `delegationPolicyId` (mã chính sách ủy quyền), và `stepId`.
+  - Phát sinh cả hai sự kiện kiểm toán bất biến: `DOCUMENT_SIGN_PDF` và `DOCUMENT_ADD_LTV`.
+- **Thông báo Hoàn tất Niêm phong (DOCUMENT_APPROVED):**
+  - Hệ thống tự động phát sinh thông báo `DOCUMENT_APPROVED` tới người tạo hồ sơ (`createdById`) và toàn bộ cán bộ tham gia các bước duyệt (`workflow.steps.assignees`).
+  - Nội dung thông báo chứa `metadata.downloadUrl = /api/documents/:id/pdf?type=SIGNED_PDF`, `signedPdfHash`, và `padesLevel = PADES_B_LT`.
+
 
 

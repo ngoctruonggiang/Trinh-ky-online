@@ -211,6 +211,32 @@ export interface SignDocumentDto {
   location?: string;
   versionNumber?: number;
   requireTimestamp?: boolean;
+  includeLtv?: boolean;
+  stepId?: string;
+  isDelegated?: boolean;
+  delegatedFromUserId?: string;
+  delegationPolicyId?: string;
+}
+
+export interface SignedPdfArtifactView {
+  id: string;
+  signedPdfHash: string;
+  rawPdfHash?: string;
+  signerName?: string;
+  signerSubject?: string;
+  signingTime?: string;
+  hasTimestamp: boolean;
+  timestampGenTime?: string;
+  tsaSubject?: string;
+  hasLtv: boolean;
+  ltvStatus?: string;
+  dssCertsCount?: number;
+  dssOcspsCount?: number;
+  dssCrlsCount?: number;
+  ltvEmbeddedAt?: string;
+  padesLevel: 'PADES_B_B' | 'PADES_B_T' | 'PADES_B_LT';
+  downloadUrl: string;
+  verifyLtvUrl: string;
 }
 
 export interface SignDocumentResultView {
@@ -231,6 +257,13 @@ export interface SignDocumentResultView {
   hasTimestamp: boolean;
   timestampGenTime?: string;
   tsaSubject?: string;
+  hasLtv?: boolean;
+  ltvStatus?: string;
+  padesLevel?: string;
+  dssCertsCount?: number;
+  dssOcspsCount?: number;
+  dssCrlsCount?: number;
+  ltvEmbeddedAt?: string;
 }
 
 export interface PdfSignatureVerificationResult {
@@ -238,6 +271,10 @@ export interface PdfSignatureVerificationResult {
   isDigestValid: boolean;
   isSignatureValid: boolean;
   isTampered: boolean;
+  signatureIntegrity?: boolean;
+  certificatePathValid?: boolean;
+  revocationStatus?: 'GOOD' | 'REVOKED' | 'UNKNOWN' | 'UNAVAILABLE';
+  timestampStatus?: 'VALID' | 'EXPIRED' | 'UNTRUSTED_TSA' | 'MISSING';
   signerSubject?: string;
   signerIssuer?: string;
   serialNumber?: string;
@@ -254,4 +291,54 @@ export interface PdfSignatureVerificationResult {
   tsaSerialNumber?: string;
   tsaPolicyOid?: string;
   timestampErrorMessage?: string;
+  hasLtv?: boolean;
+  ltvDataPresent?: boolean;
+  ltvValidationStatus?: 'VALID' | 'INCOMPLETE_CHAIN' | 'REVOCATION_DATA_MISSING' | 'EXPIRED' | 'REVOKED' | 'UNAVAILABLE';
+  padesLevel?: 'NONE' | 'PADES_B_B' | 'PADES_B_T' | 'PADES_B_LT';
+  dssInfo?: {
+    certsCount: number;
+    ocspsCount: number;
+    crlsCount: number;
+    vriEntriesCount: number;
+  };
+}
+
+export interface AddLtvDto {
+  versionNumber?: number;
+}
+
+export interface AddLtvResultView {
+  artifactId: string;
+  documentId: string;
+  documentVersionId: string;
+  signedPdfHash: string;
+  sizeBytes: number;
+  hasLtv: boolean;
+  ltvStatus: string;
+  padesLevel: string;
+  dssCertsCount: number;
+  dssOcspsCount: number;
+  dssCrlsCount: number;
+  embeddedAt: string;
+  downloadUrl: string;
+}
+
+export interface LtvVerificationResult {
+  isValid: boolean;
+  signatureIntegrity: boolean;
+  certificatePathValid: boolean;
+  revocationStatus: 'GOOD' | 'REVOKED' | 'UNKNOWN' | 'UNAVAILABLE';
+  timestampStatus: 'VALID' | 'EXPIRED' | 'UNTRUSTED_TSA' | 'MISSING';
+  hasTimestamp: boolean;
+  hasLtv: boolean;
+  ltvDataPresent: boolean;
+  ltvValidationStatus: 'VALID' | 'INCOMPLETE_CHAIN' | 'REVOCATION_DATA_MISSING' | 'EXPIRED' | 'REVOKED' | 'UNAVAILABLE';
+  padesLevel: 'NONE' | 'PADES_B_B' | 'PADES_B_T' | 'PADES_B_LT';
+  dssInfo?: {
+    certsCount: number;
+    ocspsCount: number;
+    crlsCount: number;
+    vriEntriesCount: number;
+  };
+  errorMessage?: string;
 }

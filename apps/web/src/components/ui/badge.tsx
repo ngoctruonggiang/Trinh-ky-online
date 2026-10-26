@@ -96,3 +96,36 @@ export function UrgencyBadge({ urgency, className = '' }: UrgencyBadgeProps) {
     </span>
   );
 }
+
+interface PadesBadgeProps {
+  level?: string;
+  hasTimestamp?: boolean;
+  hasLtv?: boolean;
+  className?: string;
+}
+
+export function PadesBadge({ level, hasTimestamp, hasLtv, className = '' }: PadesBadgeProps) {
+  let label = 'PAdES B-B';
+  let styles = 'bg-blue-50 text-blue-700 border-blue-200';
+  let title = 'Chữ ký số CMS PAdES Baseline B-B';
+
+  if (level === 'PADES_B_LT' || hasLtv) {
+    label = 'PAdES B-LT (LTV)';
+    styles = 'bg-emerald-50 text-emerald-800 border-emerald-300 font-semibold';
+    title = 'Chữ ký số PAdES Baseline B-LT với Document Security Store (DSS) & LTV';
+  } else if (level === 'PADES_B_T' || hasTimestamp) {
+    label = 'PAdES B-T (TSA)';
+    styles = 'bg-teal-50 text-teal-800 border-teal-300 font-medium';
+    title = 'Chữ ký số PAdES Baseline B-T kèm dấu thời gian tin cậy RFC 3161';
+  }
+
+  return (
+    <span
+      title={title}
+      className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs border ${styles} ${className}`}
+    >
+      <span className="w-1.5 h-1.5 rounded-full bg-current opacity-80" />
+      <span>{label}</span>
+    </span>
+  );
+}

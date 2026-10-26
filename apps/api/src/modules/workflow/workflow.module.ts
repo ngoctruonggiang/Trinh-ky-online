@@ -8,9 +8,11 @@ import { SlaSchedulerController } from './sla-scheduler.controller.js';
 import { NotificationModule } from '../notification/notification.module.js';
 import { DelegationModule } from '../delegation/delegation.module.js';
 import { DelegationService } from '../delegation/delegation.service.js';
+import { SigningModule } from '../signing/signing.module.js';
+import { PdfSigningService } from '../signing/engine/pdf-signing.service.js';
 
 @Module({
-  imports: [NotificationModule, DelegationModule],
+  imports: [NotificationModule, DelegationModule, SigningModule],
   controllers: [DocumentWorkflowController, SlaSchedulerController],
   providers: [
     PrismaService,
@@ -18,9 +20,12 @@ import { DelegationService } from '../delegation/delegation.service.js';
     SlaSchedulerService,
     {
       provide: WorkflowOrchestratorService,
-      useFactory: (prisma: PrismaService, delegationService: DelegationService) =>
-        new WorkflowOrchestratorService(prisma, delegationService),
-      inject: [PrismaService, DelegationService],
+      useFactory: (
+        prisma: PrismaService,
+        delegationService: DelegationService,
+        pdfSigningService: PdfSigningService
+      ) => new WorkflowOrchestratorService(prisma, delegationService, pdfSigningService),
+      inject: [PrismaService, DelegationService, PdfSigningService],
     },
   ],
   exports: [WorkflowOrchestratorService, DocumentReadService, SlaSchedulerService],

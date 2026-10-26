@@ -5,6 +5,7 @@ import {
   OID_ID_AA_SIGNATURE_TIMESTAMP_TOKEN,
   TimestampTokenVerifier,
 } from '../timestamp/timestamp-token.verifier.js';
+import { PdfDssParser } from '../dss/pdf-dss-parser.js';
 
 /**
  * Bộ xác minh chữ ký số PDF và CMS Detached độc lập trong backend,
@@ -96,7 +97,7 @@ export class PdfSignatureVerifier {
       len1 <= 0 ||
       offset2 <= len1 ||
       len2 <= 0 ||
-      offset2 + len2 !== signedPdfBuffer.length
+      offset2 + len2 > signedPdfBuffer.length
     ) {
       return {
         isValid: false,
@@ -106,8 +107,63 @@ export class PdfSignatureVerifier {
         hasTimestamp: false,
         byteRange: byteRangeNumbers,
         errorMessage:
-          'Bảng /ByteRange không bao phủ trọn vẹn tệp PDF từ byte 0 đến EOF hoặc offset bị sai lệch.',
+          'Bảng /ByteRange không bao phủ trọn vẹn tệp PDF từ byte 0 hoặc offset vượt quá dung lượng tệp.',
       };
+    }
+
+    const hasIncrementalUpdate = offset2 + len2 < signedPdfBuffer.length;
+
+    // Nếu có dữ liệu thêm vào sau chữ ký (Incremental Update):
+    // Phải kiểm tra nghiêm ngặt để phân biệt giữa DSS hợp lệ và tấn công PDF Shadow Attack
+    if (hasIncrementalUpdate) {
+      const appendedBytes = signedPdfBuffer.subarray(offset2 + len2);
+      const appendedAscii = appendedBytes.toString('binary');
+
+      // 1. Bản cập nhật bắt buộc phải có startxref và %%EOF
+      if (!appendedAscii.includes('startxref') || !appendedAscii.includes('%%EOF')) {
+        return {
+          isValid: false,
+          isDigestValid: false,
+          isSignatureValid: false,
+          isTampered: true,
+          hasTimestamp: false,
+          byteRange: byteRangeNumbers,
+          errorMessage:
+            'Phát hiện dữ liệu thêm vào sau chữ ký số không có cấu trúc xref/trailer hợp lệ (Tệp bị can thiệp trái phép sau ký).',
+        };
+      }
+
+      // 2. Phòng chống PDF Shadow Attack: Tuyệt đối không cho phép chèn thêm trang (/Page) hoặc sửa đổi box/annots
+      if (
+        /\/Type\s*\/Page\b/.test(appendedAscii) ||
+        /\/MediaBox\b/.test(appendedAscii) ||
+        /\/Annots\s*\[/.test(appendedAscii)
+      ) {
+        return {
+          isValid: false,
+          isDigestValid: false,
+          isSignatureValid: false,
+          isTampered: true,
+          hasTimestamp: false,
+          byteRange: byteRangeNumbers,
+          errorMessage:
+            'Phát hiện hành vi tấn công PDF Shadow Attack: Cố tình chèn thêm trang hoặc sửa đổi giao diện trang sau khi ký.',
+        };
+      }
+
+      // 3. Nếu không phải cấu trúc /DSS hợp lệ thì coi là dữ liệu trái phép (Unauthorized Modification)
+      if (!appendedAscii.includes('/DSS')) {
+        return {
+          isValid: false,
+          isDigestValid: false,
+          isSignatureValid: false,
+          isTampered: true,
+          hasTimestamp: false,
+          byteRange: byteRangeNumbers,
+          errorMessage:
+            'Phát hiện dữ liệu thêm vào sau chữ ký không phải là cấu trúc DSS hợp lệ (Unauthorized Modification).',
+        };
+      }
     }
 
     // 3. Trích xuất Contents hex string nằm giữa len1 và offset2
@@ -450,11 +506,70 @@ export class PdfSignatureVerifier {
         };
       }
 
+      // 10. THẨM ĐỊNH DOCUMENT SECURITY STORE (/DSS) CHO PAdES B-LT
+      const dssParse = PdfDssParser.parseDss(signedPdfBuffer, serialNumber, signerCertPem);
+
+      let hasLtv = false;
+      let ltvDataPresent = false;
+      let ltvValidationStatus: 'VALID' | 'INCOMPLETE_CHAIN' | 'REVOCATION_DATA_MISSING' | 'EXPIRED' | 'REVOKED' | 'UNAVAILABLE' | undefined;
+      let padesLevel: 'NONE' | 'PADES_B_B' | 'PADES_B_T' | 'PADES_B_LT' = 'PADES_B_B';
+
+      if (hasTimestamp && isTimestampValid) {
+        padesLevel = 'PADES_B_T';
+      }
+
+      if (dssParse.hasDss) {
+        ltvDataPresent = true;
+        ltvValidationStatus = dssParse.ltvValidationStatus;
+        if (dssParse.ltvValidationStatus === 'VALID') {
+          hasLtv = true;
+          padesLevel = 'PADES_B_LT';
+        }
+      }
+
+      // Nếu có DSS nhưng dữ liệu thu hồi bị đánh dấu REVOKED
+      if (dssParse.hasDss && dssParse.ltvValidationStatus === 'REVOKED') {
+        return {
+          isValid: false,
+          isDigestValid: true,
+          isSignatureValid: true,
+          isTampered: false,
+          signatureIntegrity: true,
+          certificatePathValid: true,
+          revocationStatus: 'REVOKED',
+          timestampStatus: hasTimestamp ? (isTimestampValid ? 'VALID' : 'UNTRUSTED_TSA') : 'MISSING',
+          hasTimestamp,
+          isTimestampValid,
+          hasLtv: false,
+          ltvDataPresent: true,
+          ltvValidationStatus: 'REVOKED',
+          padesLevel,
+          dssInfo: {
+            certsCount: dssParse.certsCount,
+            ocspsCount: dssParse.ocspsCount,
+            crlsCount: dssParse.crlsCount,
+            vriEntriesCount: dssParse.vriEntriesCount,
+          },
+          signerSubject: signerSubjectDn,
+          signerIssuer: signerIssuerDn,
+          serialNumber,
+          signingTime: signingTimeDate?.toISOString(),
+          byteRange: byteRangeNumbers,
+          messageDigestHex: embeddedDigestHex,
+          computedDigestHex,
+          errorMessage: `Xác minh LTV thất bại: ${dssParse.errorMessage || 'Chứng thư số bị thu hồi (REVOKED).'}`,
+        };
+      }
+
       return {
         isValid: true,
         isDigestValid: true,
         isSignatureValid: true,
         isTampered: false,
+        signatureIntegrity: true,
+        certificatePathValid: true,
+        revocationStatus: dssParse.revocationStatus,
+        timestampStatus: hasTimestamp ? (isTimestampValid ? 'VALID' : 'UNTRUSTED_TSA') : 'MISSING',
         hasTimestamp,
         isTimestampValid: hasTimestamp ? true : undefined,
         timestampGenTime,
@@ -462,6 +577,18 @@ export class PdfSignatureVerifier {
         tsaIssuer,
         tsaSerialNumber,
         tsaPolicyOid,
+        hasLtv,
+        ltvDataPresent,
+        ltvValidationStatus,
+        padesLevel,
+        dssInfo: dssParse.hasDss
+          ? {
+              certsCount: dssParse.certsCount,
+              ocspsCount: dssParse.ocspsCount,
+              crlsCount: dssParse.crlsCount,
+              vriEntriesCount: dssParse.vriEntriesCount,
+            }
+          : undefined,
         signerSubject: signerSubjectDn,
         signerIssuer: signerIssuerDn,
         serialNumber,

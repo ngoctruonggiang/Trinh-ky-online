@@ -11,6 +11,9 @@ import {
   UrgencyLevel,
   UserRole,
   WorkflowStatus,
+  ArtifactType,
+  ArtifactStatus,
+  SignedPdfArtifactView,
 } from '@trinh-ky/shared';
 import { PrismaService } from '../../common/prisma/prisma.service.js';
 import { UserPrincipal } from '../../common/interfaces/user-principal.interface.js';
@@ -322,6 +325,51 @@ export class DocumentReadService {
       createdAt: v.createdAt instanceof Date ? v.createdAt.toISOString() : v.createdAt,
     }));
 
+    // Truy vấn tệp PDF ký số (SIGNED_PDF artifact) nếu có
+    let signedPdfArtifact: SignedPdfArtifactView | undefined = undefined;
+    if (activeVersionRaw?.id && typeof (this.prisma as any).documentArtifact?.findUnique === 'function') {
+      const signedDocArtifact = await (this.prisma as any).documentArtifact.findUnique({
+        where: {
+          documentVersionId_artifactType: {
+            documentVersionId: activeVersionRaw.id,
+            artifactType: ArtifactType.SIGNED_PDF,
+          },
+        },
+      });
+
+      if (signedDocArtifact && signedDocArtifact.status === ArtifactStatus.COMPLETED) {
+        signedPdfArtifact = {
+          id: signedDocArtifact.id,
+          signedPdfHash: signedDocArtifact.signedPdfHash || '',
+          rawPdfHash: signedDocArtifact.rawPdfHash || undefined,
+          signerName: signedDocArtifact.signerName || undefined,
+          signerSubject: signedDocArtifact.signerSubject || undefined,
+          signingTime:
+            signedDocArtifact.signingTime instanceof Date
+              ? signedDocArtifact.signingTime.toISOString()
+              : signedDocArtifact.signingTime || undefined,
+          hasTimestamp: Boolean(signedDocArtifact.hasTimestamp),
+          timestampGenTime:
+            signedDocArtifact.timestampGenTime instanceof Date
+              ? signedDocArtifact.timestampGenTime.toISOString()
+              : signedDocArtifact.timestampGenTime || undefined,
+          tsaSubject: signedDocArtifact.tsaSubject || undefined,
+          hasLtv: Boolean(signedDocArtifact.hasLtv),
+          ltvStatus: signedDocArtifact.ltvStatus || undefined,
+          dssCertsCount: signedDocArtifact.dssCertsCount ?? undefined,
+          dssOcspsCount: signedDocArtifact.dssOcspsCount ?? undefined,
+          dssCrlsCount: signedDocArtifact.dssCrlsCount ?? undefined,
+          ltvEmbeddedAt:
+            signedDocArtifact.ltvEmbeddedAt instanceof Date
+              ? signedDocArtifact.ltvEmbeddedAt.toISOString()
+              : signedDocArtifact.ltvEmbeddedAt || undefined,
+          padesLevel: signedDocArtifact.hasLtv ? 'PADES_B_LT' : signedDocArtifact.hasTimestamp ? 'PADES_B_T' : 'PADES_B_B',
+          downloadUrl: `/api/documents/${doc.id}/pdf?type=SIGNED_PDF`,
+          verifyLtvUrl: `/api/documents/${doc.id}/verify-ltv`,
+        };
+      }
+    }
+
     // 2. Tính toán quyền hạn (Permissions calculation)
     const isCreator = doc.createdById === user.id;
     const isSuperAdmin = user.role === UserRole.SUPER_ADMIN;
@@ -573,6 +621,7 @@ export class DocumentReadService {
         isDelegatedApproval: Boolean(isDelegateeCanApprove),
         delegatedFromUserName,
       },
+      signedPdfArtifact,
     };
   }
 }

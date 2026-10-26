@@ -22,6 +22,7 @@ import { WorkflowExceptionFilter } from '../../common/filters/workflow-exception
 import { ArtifactService } from '../artifact/artifact.service.js';
 import { PdfSigningService } from './engine/pdf-signing.service.js';
 import { SignDocumentRequestDto } from './dto/sign-document.dto.js';
+import { AddLtvRequestDto } from './dto/add-ltv.dto.js';
 
 @Controller('api/documents')
 @UseGuards(AuthGuard)
@@ -107,5 +108,49 @@ export class DocumentSigningController {
     });
 
     res.end(buffer);
+  }
+
+  /**
+   * Bổ sung thông tin xác thực dài hạn DSS (LTV / PAdES Baseline B-LT) cho tệp PDF đã ký
+   * POST /api/documents/:id/add-ltv
+   */
+  @Post(':id/add-ltv')
+  @HttpCode(HttpStatus.OK)
+  async addLtv(
+    @Param('id') documentId: string,
+    @Body() dto: AddLtvRequestDto,
+    @CurrentUser() user: UserPrincipal
+  ) {
+    const result = await this.pdfSigningService.addLtvToDocument(documentId, dto, user);
+
+    return {
+      success: true,
+      data: result,
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * Xác minh toàn diện trạng thái xác thực dài hạn (LTV / DSS) của hồ sơ
+   * GET /api/documents/:id/verify-ltv
+   */
+  @Get(':id/verify-ltv')
+  async verifyLtv(
+    @Param('id') documentId: string,
+    @Query('version') version: string,
+    @CurrentUser() user: UserPrincipal
+  ) {
+    const versionNumber = version ? parseInt(version, 10) : undefined;
+    const verifyResult = await this.pdfSigningService.verifyLtv(
+      documentId,
+      versionNumber,
+      user
+    );
+
+    return {
+      success: true,
+      data: verifyResult,
+      timestamp: new Date().toISOString(),
+    };
   }
 }

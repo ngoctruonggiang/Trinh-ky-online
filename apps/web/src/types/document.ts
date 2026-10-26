@@ -144,6 +144,27 @@ export interface InAppNotification {
   createdAt: string;
 }
 
+export interface SignedPdfArtifactView {
+  id: string;
+  signedPdfHash: string;
+  rawPdfHash?: string;
+  signerName?: string;
+  signerSubject?: string;
+  signingTime?: string;
+  hasTimestamp: boolean;
+  timestampGenTime?: string;
+  tsaSubject?: string;
+  hasLtv: boolean;
+  ltvStatus?: string;
+  dssCertsCount?: number;
+  dssOcspsCount?: number;
+  dssCrlsCount?: number;
+  ltvEmbeddedAt?: string;
+  padesLevel: 'PADES_B_B' | 'PADES_B_T' | 'PADES_B_LT';
+  downloadUrl: string;
+  verifyLtvUrl: string;
+}
+
 export interface DocumentDetail extends DocumentItem {
   currentVersion: number;
   versions: DocumentVersionView[];
@@ -169,6 +190,7 @@ export interface DocumentDetail extends DocumentItem {
     isDelegatedApproval?: boolean;
     delegatedFromUserName?: string;
   };
+  signedPdfArtifact?: SignedPdfArtifactView;
 }
 
 export interface ProcessDecisionPayload {
@@ -254,6 +276,10 @@ export interface IDocumentService {
   createDocument?(
     payload: import('./template.js').CreateDocumentPayload
   ): Promise<import('./template.js').CreatedDocumentResult>;
+  verifyLtv?(
+    id: string,
+    versionNumber?: number
+  ): Promise<any>;
 }
 
 

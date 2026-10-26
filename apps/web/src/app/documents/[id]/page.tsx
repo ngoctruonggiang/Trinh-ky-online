@@ -24,9 +24,11 @@ import {
   CancelPayload,
 } from '@/types/document';
 import { documentService, isMockMode } from '@/services/api';
-import { StatusBadge, UrgencyBadge } from '@/components/ui/badge';
+import { StatusBadge, UrgencyBadge, PadesBadge } from '@/components/ui/badge';
 import { WorkflowStepper } from '@/components/documents/workflow-stepper';
 import { WorkflowActionBox } from '@/components/documents/workflow-action-box';
+import { PadesSealCard } from '@/components/documents/pades-seal-card';
+import { LtvVerificationDrawer } from '@/components/documents/ltv-verification-drawer';
 
 export default function DocumentDetailPage({
   params,
@@ -42,6 +44,7 @@ export default function DocumentDetailPage({
   const [actionLoading, setActionLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isConflictError, setIsConflictError] = useState(false);
+  const [isLtvDrawerOpen, setIsLtvDrawerOpen] = useState(false);
 
   const loadDocument = async () => {
     try {
@@ -256,6 +259,13 @@ export default function DocumentDetailPage({
                   Sắp đến hạn SLA
                 </span>
               )}
+              {document.signedPdfArtifact && (
+                <PadesBadge
+                  level={document.signedPdfArtifact.padesLevel}
+                  hasLtv={document.signedPdfArtifact.hasLtv}
+                  hasTimestamp={document.signedPdfArtifact.hasTimestamp}
+                />
+              )}
               {isMockMode ? (
                 <span className="text-2xs font-medium px-2 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">
                   Chế độ Thử nghiệm (Mock Data)
@@ -291,6 +301,14 @@ export default function DocumentDetailPage({
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         {/* Left Column: Form Content & Decision History (7 cols) */}
         <div className="lg:col-span-7 space-y-6">
+          {/* PAdES Cryptographic Seal & LTV Card */}
+          {document.signedPdfArtifact && (
+            <PadesSealCard
+              document={document}
+              onOpenLtv={() => setIsLtvDrawerOpen(true)}
+            />
+          )}
+
           {/* Form Content Card */}
           <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
             <div className="border-b border-slate-100 px-6 py-4 flex items-center justify-between bg-slate-50/50">
@@ -546,6 +564,13 @@ export default function DocumentDetailPage({
           </div>
         </div>
       </div>
+
+      {/* LTV Verification Drawer */}
+      <LtvVerificationDrawer
+        isOpen={isLtvDrawerOpen}
+        onClose={() => setIsLtvDrawerOpen(false)}
+        document={document}
+      />
     </div>
   );
 }

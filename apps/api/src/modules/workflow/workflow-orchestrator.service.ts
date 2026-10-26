@@ -27,6 +27,7 @@ import {
   SignatureRecord,
 } from '@trinh-ky/shared';
 import { DelegationService } from '../delegation/delegation.service.js';
+import { PdfSigningService } from '../signing/engine/pdf-signing.service.js';
 
 export interface CreateDocumentInput {
   templateId: string;
@@ -93,7 +94,8 @@ export interface ReassignApproverInput {
 export class WorkflowOrchestratorService {
   constructor(
     private readonly prisma: PrismaClient,
-    private readonly delegationService?: DelegationService
+    private readonly delegationService?: DelegationService,
+    private readonly pdfSigningService?: PdfSigningService
   ) {}
 
   /**
@@ -305,7 +307,7 @@ export class WorkflowOrchestratorService {
     const now = new Date();
     const nowISO = now.toISOString();
 
-    return await this.prisma.$transaction(async (tx) => {
+    const result = await this.prisma.$transaction(async (tx) => {
       // 0. Khóa hàng tài liệu để đồng bộ hóa quyết định tương tranh (Row-level lock)
       if (typeof (tx as any).$executeRaw === 'function') {
         await (tx as any).$executeRaw`SELECT id FROM documents WHERE id = ${documentId} FOR UPDATE`;
@@ -805,6 +807,36 @@ export class WorkflowOrchestratorService {
         invalidatedSignaturesCount: fsmResult.invalidatedSignatures?.length || 0,
       };
     });
+
+    // 9. Tự động kích hoạt niêm phong số PAdES B-LT khi tài liệu đạt trạng thái APPROVED
+    if (result.documentStatus === DocumentStatus.APPROVED && this.pdfSigningService) {
+      try {
+        const actorUser = await this.prisma.user.findUnique({
+          where: { id: userId },
+          select: {
+            id: true,
+            email: true,
+            fullName: true,
+            role: true,
+            organizationId: true,
+            departmentId: true,
+          },
+        });
+        if (actorUser) {
+          await this.pdfSigningService.autoSealApprovedDocument(
+            documentId,
+            actorUser as any
+          );
+        }
+      } catch (autoSealErr: any) {
+        console.error(
+          '[WorkflowOrchestrator] Lỗi khi tự động niêm phong số cho hồ sơ APPROVED:',
+          autoSealErr?.message || autoSealErr
+        );
+      }
+    }
+
+    return result;
   }
 
   /**
@@ -1401,7 +1433,7 @@ export class WorkflowOrchestratorService {
           });
 
           // Nếu có danh sách người duyệt mặc định
-          const userIds = stepConfig.defaultUserIds || [];
+          const userIds = stepConfig.defaultUserIds || (stepConfig as any).approverUserIds || [];
           for (const uid of userIds) {
             await tx.stepAssignee.create({
               data: {

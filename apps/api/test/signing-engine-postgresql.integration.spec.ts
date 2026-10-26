@@ -12,14 +12,18 @@ import { DevKeystoreGenerator } from '../src/modules/signing/dev-keystore-genera
 import { PdfSigningService } from '../src/modules/signing/engine/pdf-signing.service.js';
 import { TimestampService } from '../src/modules/signing/timestamp/timestamp.service.js';
 import { DevTestTsaProvider } from '../src/modules/signing/timestamp/dev-test-tsa.provider.js';
+import { RevocationService } from '../src/modules/signing/revocation/revocation.service.js';
+import { PdfDssService } from '../src/modules/signing/dss/pdf-dss.service.js';
 
-describe('Phase 13.3.1: RFC 3161 Trusted Timestamping & PAdES B-T (PostgreSQL Integration)', () => {
+describe('Phase 13.3.2: PAdES Baseline B-LT, DSS/VRI & Long-Term Validation (PostgreSQL Integration)', () => {
   let prisma: PrismaClient;
   let storageService: StorageService;
   let pdfGenerator: PdfGeneratorService;
   let artifactService: ArtifactService;
   let keystoreProvider: DevLocalKeystoreProvider;
   let timestampService: TimestampService;
+  let revocationService: RevocationService;
+  let pdfDssService: PdfDssService;
   let pdfSigningService: PdfSigningService;
 
   let orgAlpha: any;
@@ -49,12 +53,15 @@ describe('Phase 13.3.1: RFC 3161 Trusted Timestamping & PAdES B-T (PostgreSQL In
     artifactService = new ArtifactService(prisma as any, storageService, pdfGenerator);
     keystoreProvider = new DevLocalKeystoreProvider();
     timestampService = new TimestampService();
+    revocationService = new RevocationService();
+    pdfDssService = new PdfDssService(revocationService);
     pdfSigningService = new PdfSigningService(
       prisma as any,
       storageService,
       artifactService,
       keystoreProvider,
-      timestampService
+      timestampService,
+      pdfDssService
     );
 
     // 1. Tạo tổ chức Alpha và Beta
@@ -225,18 +232,17 @@ describe('Phase 13.3.1: RFC 3161 Trusted Timestamping & PAdES B-T (PostgreSQL In
 
   afterAll(async () => {
     // Dọn dẹp dữ liệu kiểm thử
-    if (documentAlpha) {
-      const artifacts = await prisma.documentArtifact.findMany({
-        where: { documentId: documentAlpha.id },
-      });
-      for (const art of artifacts) {
-        try {
-          await storageService.delete(art.storageKey);
-        } catch {}
+    if (orgAlpha) {
+      const alphaDocs = await prisma.document.findMany({ where: { organizationId: orgAlpha.id } });
+      for (const d of alphaDocs) {
+        const artifacts = await prisma.documentArtifact.findMany({ where: { documentId: d.id } });
+        for (const art of artifacts) {
+          try { await storageService.delete(art.storageKey); } catch {}
+        }
+        await prisma.documentArtifact.deleteMany({ where: { documentId: d.id } });
+        await prisma.documentVersion.deleteMany({ where: { documentId: d.id } });
       }
-      await prisma.documentArtifact.deleteMany({ where: { documentId: documentAlpha.id } });
-      await prisma.documentVersion.deleteMany({ where: { documentId: documentAlpha.id } });
-      await prisma.document.deleteMany({ where: { id: documentAlpha.id } });
+      await prisma.document.deleteMany({ where: { organizationId: orgAlpha.id } });
     }
 
     if (certAlpha1) {
@@ -516,5 +522,174 @@ describe('Phase 13.3.1: RFC 3161 Trusted Timestamping & PAdES B-T (PostgreSQL In
     expect(latestLog.userId).toBe(userAlpha1.id);
     expect((latestLog.details as any)?.hasTimestamp).toBe(true);
     expect((latestLog.details as any)?.tsaSubject).toContain('Trusted TSA');
+  });
+
+  it('10. should add LTV to existing signed document (POST /api/documents/:id/add-ltv) and achieve PAdES B-LT', async () => {
+    const addLtvResult = await pdfSigningService.addLtvToDocument(
+      documentAlpha.id,
+      {},
+      principalAlpha1
+    );
+
+    expect(addLtvResult.hasLtv).toBe(true);
+    expect(addLtvResult.ltvStatus).toBe('VALID');
+    expect(addLtvResult.padesLevel).toBe('PADES_B_LT');
+    expect(addLtvResult.dssCertsCount).toBeGreaterThanOrEqual(1);
+    expect(addLtvResult.dssOcspsCount).toBeGreaterThanOrEqual(1);
+    expect(addLtvResult.embeddedAt).toBeDefined();
+
+    // Kiểm tra bản ghi DocumentArtifact trong CSDL PostgreSQL
+    const signedArtifact = await prisma.documentArtifact.findFirst({
+      where: {
+        documentId: documentAlpha.id,
+        documentVersionId: docVersionAlpha.id,
+        artifactType: ArtifactType.SIGNED_PDF,
+      },
+    });
+
+    expect(signedArtifact?.hasLtv).toBe(true);
+    expect(signedArtifact?.ltvStatus).toBe('VALID');
+    expect(signedArtifact?.dssCertsCount).toBeGreaterThanOrEqual(1);
+    expect(signedArtifact?.dssOcspsCount).toBeGreaterThanOrEqual(1);
+    expect(signedArtifact?.ltvEmbeddedAt).toBeDefined();
+  });
+
+  it('11. should verify LTV data via GET /api/documents/:id/verify-ltv and verifyDocumentSignature', async () => {
+    // 1. Thẩm định qua verifyLtv
+    const ltvVerification = await pdfSigningService.verifyLtv(
+      documentAlpha.id,
+      principalAlpha1
+    );
+
+    expect(ltvVerification.hasLtv).toBe(true);
+    expect(ltvVerification.ltvValidationStatus).toBe('VALID');
+    expect(ltvVerification.padesLevel).toBe('PADES_B_LT');
+    expect(ltvVerification.dssInfo.certsCount).toBeGreaterThanOrEqual(1);
+    expect(ltvVerification.dssInfo.ocspsCount).toBeGreaterThanOrEqual(1);
+    expect(ltvVerification.revocationStatus).toBe('GOOD');
+
+    // 2. Thẩm định qua verifyDocumentSignature
+    const fullVerify = await pdfSigningService.verifyDocumentSignature(
+      documentAlpha.id,
+      { versionNumber: 1 },
+      principalAlpha1
+    );
+
+    expect(fullVerify.isValid).toBe(true);
+    expect(fullVerify.isSignatureValid).toBe(true);
+    expect(fullVerify.hasTimestamp).toBe(true);
+    expect(fullVerify.isTimestampValid).toBe(true);
+    expect(fullVerify.hasLtv).toBe(true);
+    expect(fullVerify.ltvDataPresent).toBe(true);
+    expect(fullVerify.ltvValidationStatus).toBe('VALID');
+    expect(fullVerify.padesLevel).toBe('PADES_B_LT');
+    expect(fullVerify.dssInfo).toBeDefined();
+    expect(fullVerify.dssInfo?.certsCount).toBeGreaterThanOrEqual(1);
+  });
+
+  it('12. should sign new document directly with includeLtv: true (PAdES B-LT in one step)', async () => {
+    // Tạo document mới cho Alpha
+    const docAlpha2 = await prisma.document.create({
+      data: {
+        documentNumber: `DOC-LTV-DIRECT-${Date.now()}`,
+        title: 'Hồ sơ thử nghiệm PAdES B-LT ký trực tiếp',
+        organizationId: orgAlpha.id,
+        templateId: template.id,
+        templateVersionId: templateVersion.id,
+        createdById: userAlpha1.id,
+        status: 'SUBMITTED',
+        currentVersion: 1,
+      },
+    });
+
+    const formData2 = {
+      contractNumber: 'HD-DIRECT-LT-001',
+      contractValue: 990000000,
+      customerName: 'Đối Tác Thử Nghiệm B-LT',
+    };
+    const formDataHash2 = crypto.createHash('sha256').update(JSON.stringify(formData2)).digest('hex');
+
+    const docVerAlpha2 = await prisma.documentVersion.create({
+      data: {
+        documentId: docAlpha2.id,
+        versionNumber: 1,
+        formData: formData2 as any,
+        sha256Hash: formDataHash2,
+        createdById: userAlpha1.id,
+      },
+    });
+
+    // Render bản PDF thô OFFICIAL_UNSIGNED
+    await artifactService.renderArtifact(
+      docAlpha2.id,
+      { versionNumber: 1, artifactType: ArtifactType.OFFICIAL_UNSIGNED },
+      principalAlpha1
+    );
+
+    // Ký số kèm cả TSA và LTV trực tiếp
+    const signResult = await pdfSigningService.signDocument(
+      docAlpha2.id,
+      {
+        reason: 'Ký duyệt và nhúng đầy đủ bằng chứng kiểm tra dài hạn B-LT',
+        certificateId: certAlpha1.id,
+        requireTimestamp: true,
+        includeLtv: true,
+      },
+      principalAlpha1
+    );
+
+    expect(signResult.hasTimestamp).toBe(true);
+    expect(signResult.hasLtv).toBe(true);
+    expect(signResult.ltvStatus).toBe('VALID');
+    expect(signResult.padesLevel).toBe('PADES_B_LT');
+    expect(signResult.dssCertsCount).toBeGreaterThanOrEqual(1);
+
+    // Xác minh lại tệp vừa ký
+    const verifyResult = await pdfSigningService.verifyDocumentSignature(
+      docAlpha2.id,
+      { versionNumber: 1 },
+      principalAlpha1
+    );
+
+    expect(verifyResult.isValid).toBe(true);
+    expect(verifyResult.hasLtv).toBe(true);
+    expect(verifyResult.padesLevel).toBe('PADES_B_LT');
+  });
+
+  it('13. should enforce strict tenant isolation on LTV endpoints (ForbiddenException for Tenant Beta)', async () => {
+    // Tenant Beta cố tình thêm LTV vào tài liệu của Alpha
+    await expect(
+      pdfSigningService.addLtvToDocument(
+        documentAlpha.id,
+        {},
+        principalBeta
+      )
+    ).rejects.toThrow(ForbiddenException);
+
+    // Tenant Beta cố tình xác minh LTV tài liệu của Alpha
+    await expect(
+      pdfSigningService.verifyLtv(
+        documentAlpha.id,
+        principalBeta
+      )
+    ).rejects.toThrow(ForbiddenException);
+  });
+
+  it('14. should record DOCUMENT_ADD_LTV audit log with DSS metrics', async () => {
+    const auditLogs = await prisma.auditLog.findMany({
+      where: {
+        documentId: documentAlpha.id,
+        action: AuditAction.DOCUMENT_ADD_LTV,
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    expect(auditLogs.length).toBeGreaterThan(0);
+    const ltvLog = auditLogs[0];
+    expect(ltvLog.userId).toBe(userAlpha1.id);
+    expect((ltvLog.details as any)?.hasLtv).toBe(true);
+    expect((ltvLog.details as any)?.ltvStatus).toBe('VALID');
+    expect((ltvLog.details as any)?.dssCertsCount).toBeGreaterThanOrEqual(1);
+    expect((ltvLog.details as any)?.dssOcspsCount).toBeGreaterThanOrEqual(1);
   });
 });

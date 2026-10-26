@@ -649,6 +649,12 @@ model DocumentArtifact {
   tsaSubject        String?        // Subject DN của TSA
   tsaSerialNumber   String?        // Số serial của token hoặc TSA cert
   tsaPolicyOid      String?        // Policy OID của TSA
+  hasLtv            Boolean        @default(false) // Có nhúng thông tin xác thực dài hạn DSS (PAdES B-LT)
+  ltvStatus         String?        // Trạng thái LTV: VALID, INCOMPLETE, REVOCATION_UNAVAILABLE
+  dssCertsCount     Int?           // Số chứng thư trong /DSS /Certs
+  dssOcspsCount     Int?           // Số phản hồi OCSP trong /DSS /OCSPs
+  dssCrlsCount      Int?           // Số danh sách thu hồi CRL trong /DSS /CRLs
+  ltvEmbeddedAt     DateTime?      // Thời điểm nhúng DSS
   requestedById     String
   errorMessage      String?
   startedAt         DateTime?
@@ -668,6 +674,7 @@ model DocumentArtifact {
   @@index([rawPdfHash])
   @@index([signedPdfHash])
   @@index([certificateId])
+  @@index([hasLtv])
   @@map("document_artifacts")
 }
 

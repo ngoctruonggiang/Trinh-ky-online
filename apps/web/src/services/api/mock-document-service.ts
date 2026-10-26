@@ -687,6 +687,32 @@ export class MockDocumentService implements IDocumentService {
     });
     return { success: true, message: 'Reassigned successfully' };
   }
+
+  async verifyLtv(
+    id: string,
+    versionNumber?: number
+  ): Promise<any> {
+    const doc = this.documents.find((d) => d.id === id);
+    if (!doc) throw new Error('Document not found');
+    return {
+      isValid: true,
+      signatureIntegrity: true,
+      certificatePathValid: true,
+      revocationStatus: 'GOOD',
+      timestampStatus: 'VALID',
+      hasTimestamp: true,
+      hasLtv: true,
+      ltvDataPresent: true,
+      ltvValidationStatus: 'VALID',
+      padesLevel: 'PADES_B_LT',
+      dssInfo: {
+        certsCount: 3,
+        ocspsCount: 1,
+        crlsCount: 1,
+        vriEntriesCount: 1,
+      },
+    };
+  }
 }
 
 export const mockDocumentService = new MockDocumentService();

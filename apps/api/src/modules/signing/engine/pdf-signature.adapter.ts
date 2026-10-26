@@ -58,6 +58,8 @@ export interface PdfSigningResult {
   tsaIssuerDn?: string;
   tsaSerialNumber?: string;
   tsaPolicyOid?: string;
+  signatureHex?: string;
+  signatureValueBuffer?: Buffer;
 }
 
 /**
@@ -268,6 +270,8 @@ export class PdfSignatureAdapter {
       tsaIssuerDn: cmsResult.tsaIssuerDn,
       tsaSerialNumber: cmsResult.tsaSerialNumber,
       tsaPolicyOid: cmsResult.tsaPolicyOid,
+      signatureHex: cmsResult.signatureHex,
+      signatureValueBuffer: Buffer.from(cmsResult.signatureHex, 'hex'),
     };
   }
 }

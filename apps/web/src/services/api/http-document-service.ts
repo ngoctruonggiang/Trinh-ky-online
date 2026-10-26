@@ -287,4 +287,20 @@ export class HttpDocumentService implements IDocumentService {
       }
     );
   }
+
+  /**
+   * Xác minh dữ liệu xác thực dài hạn LTV / DSS (GET /api/documents/:id/verify-ltv)
+   */
+  public async verifyLtv(
+    id: string,
+    versionNumber?: number
+  ): Promise<any> {
+    const query = versionNumber ? `?version=${versionNumber}` : '';
+    return this.request<any>(
+      `/documents/${encodeURIComponent(id)}/verify-ltv${query}`,
+      {
+        method: 'GET',
+      }
+    );
+  }
 }

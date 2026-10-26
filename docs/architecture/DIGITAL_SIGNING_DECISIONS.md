@@ -277,6 +277,58 @@ Nếu không có bảng quản lý chứng thư tập trung, hệ thống khó t
 
 ---
 
+## ADR-12: PAdES BASELINE B-LT, DOCUMENT SECURITY STORE (DSS) & SSRF DEFENSE (PHASE 13.3.2)
+
+### Bối cảnh & Vấn đề
+Để đảm bảo chữ ký số có thể xác minh dài hạn mà không phụ thuộc vào trạng thái trực tuyến của CA/OCSP/CRL trong tương lai:
+1. Chuẩn ETSI EN 319 142-1 định nghĩa PAdES Baseline B-LT: toàn bộ chuỗi chứng thực X.509 cùng dữ liệu thu hồi (OCSP Response RFC 6960, CRL RFC 5280) phải được nhúng vào PDF qua từ điển Document Security Store (`/DSS`).
+2. Việc bổ sung dữ liệu xác thực sau khi ký không được làm hỏng cấu trúc ByteRange của chữ ký ban đầu.
+3. Khi tự động tải OCSP/CRL từ URL bên ngoài (AIA / CRL DP), hệ thống đối mặt với nguy cơ tấn công Server-Side Request Forgery (SSRF) vào hạ tầng nội bộ và dịch vụ metadata cloud.
+
+### Quyết định
+1. **Bổ sung DSS qua PDF Incremental Update**:
+   - Sử dụng cơ chế ghi nối tiếp (Incremental Update) chuẩn ISO 32000-1 clause 12.8.4.
+   - Thêm các đối tượng indirect stream (`/Type /X509`, `/Type /OCSP`, `/Type /CRL`), từ điển `/DSS`, `/VRI` và bảng xref mới ở cuối tệp.
+   - ByteRange và nội dung số của Revision 1 được bảo toàn tuyệt đối 100%.
+2. **Cơ chế Phòng thủ SSRF Nhiều Lớp (`SsrfProtectionUtil`)**:
+   - Kiểm tra IP trước khi gọi mạng: chặn hoàn toàn IPv4 Loopback (`127.0.0.0/8`), Private Network (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), Link-local/Cloud Metadata (`169.254.169.254`).
+   - Chặn IPv6 Loopback (`::1`), Unique Local (`fc00::/7`), Link-local (`fe80::/10`).
+   - Giới hạn kích thước phản hồi (128KB cho OCSP, 10MB cho CRL), timeout tối đa 5000ms.
+3. **Phòng chống PDF Shadow Attack**:
+   - `PdfSignatureVerifier` kiểm tra vùng sau chữ ký: cấm mọi đối tượng can thiệp hiển thị (`/Type /Page`, `/MediaBox`, `/Annots`).
+4. **Nguyên tắc Fail-Closed khi Chứng thư bị Thu hồi**:
+   - Nếu dữ liệu OCSP/CRL cho thấy chứng thư số ở trạng thái `REVOKED`, hệ thống từ chối cấp chứng nhận B-LT ngay lập tức.
+5. **Ranh giới B-LT vs B-LTA**:
+   - Hoàn thành đầy đủ PAdES Baseline B-LT. Chưa triển khai B-LTA vì B-LTA yêu cầu Document Timestamp định kỳ bảo vệ chứng cứ dài hạn theo thời gian.
+
+---
+
+## ADR-13: WORKFLOW AUTO-SIGNING ON TERMINAL APPROVAL, DELEGATION LINKAGE & PRODUCTION READINESS (PHASE 13.4)
+
+### Bối cảnh & Vấn đề
+1. Trong luồng nghiệp vụ thực tế, khi người duyệt cuối cùng bấm Duyệt hồ sơ và tài liệu chuyển sang trạng thái kết thúc `APPROVED`, hồ sơ phải được tự động ký niêm phong điện tử với dấu thời gian và LTV mà không đòi hỏi thao tác thủ công riêng biệt.
+2. Việc phê duyệt có thể diễn ra thông qua chính sách ủy quyền (Delegation): cần liên kết minh bạch giữa người duyệt thực tế (`actualActor`), người ủy quyền (`delegator`), chính sách ủy quyền (`delegationPolicyId`), và chứng thư số được áp dụng.
+3. Nếu một tổ chức chưa cấu hình chứng thư số PKI hoặc khóa ký chưa sẵn sàng, hệ thống không được làm tắc nghẽn luồng phê duyệt mà cần có cơ chế phục hồi êm thuận (Graceful Fallback).
+4. Người dùng cần theo dõi trạng thái niêm phong số, tải tệp đã ký và thẩm định 5 trụ cột PAdES Baseline B-LT trực quan ngay trên giao diện web.
+
+### Quyết định
+1. **Tự động Niêm phong số khi Phê duyệt Hoàn tất (Auto-Seal Trigger)**:
+   - Trong `WorkflowOrchestratorService.processAssigneeDecision`, khi tài liệu chuyển sang `APPROVED`, hệ thống tự động kích hoạt `PdfSigningService.autoSealApprovedDocument(documentId, actor)`.
+   - Ưu tiên chọn con dấu điện tử chung của tổ chức (`userId: null, status: ACTIVE`), sau đó đến chứng thư cá nhân của người duyệt cuối cùng có khóa sẵn sàng trong `ISigningKeyProvider`.
+   - Bắt buộc tham số `requireTimestamp: true` và `includeLtv: true` để tạo ra tệp PDF chuẩn PAdES Baseline B-LT.
+2. **Cơ chế Graceful Fallback (Fail-Safe cho Luồng Nghiệp vụ)**:
+   - Nếu tổ chức chưa có chứng thư số hợp lệ, phương thức `autoSealApprovedDocument` trả về `null`, ghi log cảnh báo và cho phép transaction phê duyệt hoàn thành thành công (`APPROVED`), không phát sinh exception làm treo hồ sơ.
+3. **Liên kết Ủy quyền & Đa Chữ ký (Delegation Linkage)**:
+   - Bản ghi kiểm toán `DOCUMENT_SIGN_PDF` và `DOCUMENT_ADD_LTV` ghi nhận đầy đủ siêu dữ liệu: `stepId`, `isDelegated`, `delegatorId`, `delegationPolicyId`, và `certificateId`.
+4. **Phát sinh Thông báo Kèm Liên kết Tải về**:
+   - Tự động phát thông báo `DOCUMENT_APPROVED` tới người tạo hồ sơ và tất cả người tham gia kèm link download `/api/documents/:id/pdf?type=SIGNED_PDF`.
+5. **Giao diện Người dùng Đẳng cấp (Frontend Web Integration)**:
+   - Triển khai `PadesSealCard`, `PadesBadge` (`PADES_B_LT`), và `LtvVerificationDrawer` hiển thị kết quả kiểm định 5 trụ cột (ByteRange Integrity, X.509 Chain, RFC 3161 TSA, DSS /Certs /OCSPs /CRLs, Anti-Shadow Attack) theo thời gian thực.
+6. **Ranh giới PAdES B-LT**:
+   - Xác nhận đạt chuẩn PAdES Baseline B-LT; không tuyên bố PAdES Baseline B-LTA khi chưa triển khai Document Timestamping định kỳ.
+
+---
+
 ## BẢNG TỔNG HỢP CÁC QUYẾT ĐỊNH
 
 | Mã ADR | Chủ đề | Lựa chọn chính | Trạng thái |
@@ -292,4 +344,8 @@ Nếu không có bảng quản lý chứng thư tập trung, hệ thống khó t
 | **ADR-09** | Danh mục Chứng thư | Phân quyền Tenant/User, bất biến quyền sở hữu, kiểm soát thu hồi | **APPROVED** |
 | **ADR-10** | CMS/ByteRange Engine| CMS Detached, cấp phát ByteRange, chống tràn placeholder, Fail-closed self-verify | **APPROVED** |
 | **ADR-11** | RFC 3161 TSA & B-T | `id-aa-signatureTimeStampToken` trong `unsignedAttrs`, EKU verification, Fail-closed policy | **APPROVED** |
+| **ADR-12** | PAdES B-LT & DSS | Incremental Update, Document Security Store, Anti-SSRF, Chống Shadow Attack | **APPROVED** |
+| **ADR-13** | Auto-Signing & UI | Tự động niêm phong B-LT khi APPROVED, Delegation Linkage, PadesSealCard, Drawer | **APPROVED** |
+
+
 

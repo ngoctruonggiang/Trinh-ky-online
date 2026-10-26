@@ -25,4 +25,8 @@ export class SignDocumentRequestDto {
   @IsOptional()
   @IsBoolean({ message: 'requireTimestamp phải là giá trị boolean' })
   requireTimestamp?: boolean;
+
+  @IsOptional()
+  @IsBoolean({ message: 'includeLtv phải là giá trị boolean' })
+  includeLtv?: boolean;
 }

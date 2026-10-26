@@ -522,15 +522,86 @@ apps/api/src/modules/signing/timestamp/
 
 ---
 
-## 10. TỔNG KẾT KIẾN TRÚC & RANH GIỚI HIỆN TẠI
+---
+
+## 10. KIẾN TRÚC PAdES BASELINE B-LT & DOCUMENT SECURITY STORE (DSS) (PHASE 13.3.2)
+
+```mermaid
+flowchart TD
+    subgraph SignedPdf [Tệp PDF đã ký PAdES B-T]
+        Rev1[Revision 1: PDF Content + Chữ ký số + TimeStampToken]
+    end
+
+    subgraph LtvEngine [LTV / DSS Engine]
+        ChainRes[Certificate Chain Resolver]
+        RevFetch[Revocation Service & SSRF Defense]
+        DssAppender[PDF DSS Appender: Incremental Update]
+    end
+
+    subgraph DssDict [Document Security Store /DSS]
+        Certs["/Certs: Mảng X.509 DER (Signer, Intermediate, Root CA)"]
+        Ocsps["/OCSPs: Mảng RFC 6960 BasicOCSPResponse DER"]
+        Crls["/CRLs: Mảng RFC 5280 X509CRL DER"]
+        Vri["/VRI: Validation-Related Information Dictionary"]
+    end
+
+    SignedPdf --> ChainRes
+    ChainRes -->|Chuỗi chứng thư| RevFetch
+    RevFetch -->|OCSP Response & CRL| DssAppender
+    DssAppender -->|Nối thêm Incremental Update| FinalPdf[Tệp PDF PAdES Baseline B-LT]
+    FinalPdf --> DssDict
+```
+
+### 10.1. Nguyên lý PDF Incremental Update cho DSS (ISO 32000-1 clause 12.8.4 & ETSI EN 319 142-1 clause 5.4)
+1. **Bảo toàn 100% ByteRange của Revision 1**:
+   - Chữ ký số điện tử ban đầu bao phủ toàn bộ nội dung tài liệu trước đó qua cấu trúc ByteRange `[0, offset1, offset2, len2]`.
+   - Bổ sung DSS được thực hiện thông qua **Incremental Update** chuẩn ISO 32000-1: các đối tượng indirect stream (`/Type /X509`, `/Type /OCSP`, `/Type /CRL`), từ điển `/DSS`, `/VRI` và bảng tham chiếu chéo `xref` mới được **ghi nối tiếp vào cuối tệp**.
+   - ByteRange ban đầu và mã băm SHA-256 của Revision 1 **tuyệt đối không bị thay đổi hoặc vô hiệu hóa**.
+
+2. **Cấu trúc Từ điển Document Security Store (`/DSS`)**:
+   - `/Certs`: Danh sách tham chiếu indirect object chứa luồng byte nhị phân của tất cả chứng thư số trong đường dẫn xác thực (Signer, Intermediate CA, Root CA, TSA).
+   - `/OCSPs`: Danh sách phản hồi OCSP (RFC 6960) nhị phân ASN.1 DER đã được ký số hợp lệ bởi CA.
+   - `/CRLs`: Danh sách thu hồi chứng thư số CRL (RFC 5280) nhị phân ASN.1 DER do CA phát hành.
+   - `/VRI`: Từ điển ánh xạ SHA-1 hoặc SHA-256 của chữ ký số (`signatureValue`) tới tập dữ liệu xác thực tương ứng của chữ ký đó.
+
+3. **Phòng thủ Chống Tấn công PDF Shadow Attack**:
+   - `PdfSignatureVerifier` kiểm tra toàn bộ dữ liệu nằm sau vùng chữ ký `offset2 + len2`.
+   - Chỉ cho phép các đối tượng thuộc về `/DSS`, `/VRI`, `xref`, `trailer`, `startxref`.
+   - Bất kỳ đối tượng nào can thiệp vào giao diện tài liệu (`/Type /Page`, `/MediaBox`, `/Annots`, `/Contents`) sau chữ ký đều bị phát hiện ngay lập tức và đánh dấu `isTampered: true`.
+
+4. **Phòng thủ SSRF Khi Thu Thập Dữ Liệu Thu Hồi (`SsrfProtectionUtil`)**:
+   - Chặn tuyệt đối các URL trỏ vào IPv4 Loopback (`127.0.0.0/8`), Private Network (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), Link-local/Cloud Metadata (`169.254.169.254`).
+   - Chặn IPv6 Loopback (`::1`), Unique Local (`fc00::/7`), Link-local (`fe80::/10`).
+   - Chỉ cho phép giao thức `http` và `https`.
+   - Giới hạn kích thước phản hồi (128KB cho OCSP, 10MB cho CRL) và timeout nghiêm ngặt (5000ms).
+
+---
+
+## 11. TỔNG KẾT KIẾN TRÚC & TÍCH HỢP TOÀN DIỆN (PHASE 13.4 HOÀN TẤT)
 
 - **Đã hoàn thành Phase 13.1**: PDF Rendering Engine (`PdfGeneratorService`) và Secure Local Storage (`StorageService`).
 - **Đã hoàn thành Phase 13.2.1**: Nền tảng quản lý khóa `ISigningKeyProvider`, Keystore cục bộ bảo mật, và Certificate Registry phân quyền đa doanh nghiệp.
 - **Đã hoàn thành Phase 13.2.2**: CMS/PDF Signing Engine thực thụ với CMS Detached, PDF Signature Adapter, ByteRange allocation, Independent Verifier, và Fail-closed orchestration.
 - **Đã hoàn thành Phase 13.3.1**: RFC 3161 Trusted Timestamping & PAdES B-T Readiness với TSA Client, Verifier, Dev/Http TSA Providers, nhúng `id-aa-signatureTimeStampToken`, và kiểm chứng thành công bằng OpenSSL 3.5.7 CLI độc lập.
-- **Ranh giới chưa triển khai (Dành cho Phase 13.3.2 & 13.4)**:
-  - Chưa triển khai đầy đủ LTV/DSS/VRI (PAdES B-LT và B-LTA).
-  - Chưa tự động ký khi tài liệu chuyển sang `APPROVED` (workflow tự động sẽ được thiết kế ở Phase 13.4).
-  - Chưa công khai tài liệu hoặc thông tin cá nhân.
+- **Đã hoàn thành Phase 13.3.2**: PAdES Baseline B-LT, DSS/VRI & Long-Term Validation với `PdfDssAppender`, `PdfDssParser`, `RevocationService`, SSRF Defense, và kiểm chứng OpenSSL 3.5.7 CLI thành công.
+- **Đã hoàn thành Phase 13.4 — Workflow Auto-Signing Integration & Production Readiness**:
+  1. **Tự động Niêm phong số khi Phê duyệt Hoàn tất (Auto-Seal on Terminal APPROVED)**:
+     - `WorkflowOrchestratorService` tự động kích hoạt `PdfSigningService.autoSealApprovedDocument(documentId, actor)` ngay khi tài liệu chuyển sang trạng thái cuối cùng `APPROVED`.
+     - Lựa chọn con dấu điện tử tổ chức (`userId: null`) hoặc chứng thư cá nhân của người duyệt cuối cùng có khóa sẵn sàng trong `ISigningKeyProvider`.
+     - Ký số bắt buộc RFC 3161 Timestamp (`requireTimestamp: true`) và Document Security Store (`includeLtv: true`) để sinh tệp `SIGNED_PDF` chuẩn PAdES Baseline B-LT.
+     - Cơ chế **Fail-safe / Graceful Fallback**: Nếu tổ chức chưa nạp chứng thư PKI, luồng duyệt hồ sơ vẫn hoàn thành êm thuận (`APPROVED`) không làm gián đoạn nghiệp vụ.
+  2. **Liên kết Ủy quyền & Đa Chữ ký (Delegation Linkage & Multi-Signer Audit Trail)**:
+     - Toàn bộ hành vi ký và duyệt theo ủy quyền được liên kết nguyên tử: `actualActor`, `delegatorId`, `delegationPolicyId`, `stepId`, và `certificateId`.
+     - Ghi nhận đầy đủ 2 sự kiện kiểm toán bất biến: `DOCUMENT_SIGN_PDF` và `DOCUMENT_ADD_LTV`.
+  3. **Thông báo Tức thì với Đường dẫn Tải về**:
+     - Phát sinh thông báo `DOCUMENT_APPROVED` tới người lập hồ sơ và tất cả người tham gia kèm link tải `/api/documents/:id/pdf?type=SIGNED_PDF`.
+  4. **Giao diện Người dùng Đẳng cấp (Production UI Integration)**:
+     - `PadesSealCard` hiển thị con dấu điện tử, thông tin người ký, dấu thời gian, số lượng certs/ocsp và nút hành động tải/xác minh.
+     - `PadesBadge` trực quan hóa cấp độ chữ ký (`PADES_B_LT`, `PADES_B_T`, `PADES_B_B`).
+     - `LtvVerificationDrawer` trượt từ cạnh phải, phân tích minh bạch 5 trụ cột xác minh PAdES Baseline B-LT theo thời gian thực.
+- **Ranh giới Kỹ thuật (Scope Boundaries)**:
+  - Hệ thống đạt đầy đủ chuẩn **PAdES Baseline B-LT**.
+  - Không tuyên bố PAdES Baseline B-LTA khi chưa triển khai Document Timestamping (DTS) định kỳ bảo vệ chứng cứ dài hạn theo thời gian.
+
 
 

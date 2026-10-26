@@ -143,5 +143,6 @@ export interface DocumentDetailDto extends DocumentListItemDto {
   signatures: SignatureViewDto[];
   reassignmentHistories: StepReassignmentHistoryViewDto[];
   permissions: DocumentPermissionsDto;
+  signedPdfArtifact?: import('@trinh-ky/shared').SignedPdfArtifactView;
 }
 

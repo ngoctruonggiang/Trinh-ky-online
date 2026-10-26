@@ -2068,12 +2068,280 @@ async function runLiveTests() {
   }
   console.log('   -> PASS (Cách ly Tenant tuyệt đối trên các tài liệu đã ký số có dấu thời gian)\n');
 
+  // Test 86: Bổ sung DSS vào tài liệu đã ký qua HTTP API (POST /api/documents/:id/add-ltv)
+  console.log('86. Test Bổ sung DSS / VRI vào tài liệu đã ký POST /add-ltv (PAdES B-T -> PAdES B-LT):');
+  const resAddLtv = await fetch(`${API_BASE}/documents/${createdDocWithWf.id}/add-ltv`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenUserA}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({}),
+  });
+  console.log(`   HTTP Status: ${resAddLtv.status}`);
+  if (resAddLtv.status !== 200 && resAddLtv.status !== 201) {
+    const errText = await resAddLtv.text();
+    throw new Error(`Test 86 thất bại: HTTP status ${resAddLtv.status} - ${errText}`);
+  }
+  const bodyAddLtv = await resAddLtv.json();
+  console.log(`   Response LTV: hasLtv=${bodyAddLtv.data?.hasLtv}, status=${bodyAddLtv.data?.ltvStatus}, padesLevel=${bodyAddLtv.data?.padesLevel}, dssCerts=${bodyAddLtv.data?.dssCertsCount}, dssOcsps=${bodyAddLtv.data?.dssOcspsCount}`);
+  if (
+    bodyAddLtv.data?.hasLtv !== true ||
+    bodyAddLtv.data?.ltvStatus !== 'VALID' ||
+    bodyAddLtv.data?.padesLevel !== 'PADES_B_LT' ||
+    bodyAddLtv.data?.dssCertsCount < 1 ||
+    bodyAddLtv.data?.dssOcspsCount < 1
+  ) {
+    throw new Error('Test 86 thất bại: Dữ liệu LTV phản hồi không đạt chuẩn PAdES B-LT');
+  }
+  console.log('   -> PASS (Bổ sung DSS / VRI vào tài liệu đã ký qua HTTP API thành công)\n');
+
+  // Test 87: Thẩm định LTV qua HTTP API GET /api/documents/:id/verify-ltv
+  console.log('87. Test Thẩm định dữ liệu LTV chuyên biệt GET /verify-ltv:');
+  const resVerifyLtv = await fetch(`${API_BASE}/documents/${createdDocWithWf.id}/verify-ltv`, {
+    headers: {
+      Authorization: `Bearer ${tokenUserA}`,
+    },
+  });
+  console.log(`   HTTP Status: ${resVerifyLtv.status}`);
+  if (resVerifyLtv.status !== 200) {
+    const errText = await resVerifyLtv.text();
+    throw new Error(`Test 87 thất bại: HTTP status ${resVerifyLtv.status} - ${errText}`);
+  }
+  const bodyVerifyLtv = await resVerifyLtv.json();
+  console.log(`   LTV Verify: hasLtv=${bodyVerifyLtv.data?.hasLtv}, status=${bodyVerifyLtv.data?.ltvValidationStatus}, padesLevel=${bodyVerifyLtv.data?.padesLevel}, certsCount=${bodyVerifyLtv.data?.dssInfo?.certsCount}, ocspsCount=${bodyVerifyLtv.data?.dssInfo?.ocspsCount}`);
+  if (
+    bodyVerifyLtv.data?.hasLtv !== true ||
+    bodyVerifyLtv.data?.ltvValidationStatus !== 'VALID' ||
+    bodyVerifyLtv.data?.padesLevel !== 'PADES_B_LT' ||
+    bodyVerifyLtv.data?.dssInfo?.certsCount < 1
+  ) {
+    throw new Error('Test 87 thất bại: Kết quả thẩm định LTV qua API không hợp lệ');
+  }
+  console.log('   -> PASS (Xác minh dữ liệu xác thực dài hạn LTV GET /verify-ltv thành công)\n');
+
+  // Test 88: Xác minh toàn diện chữ ký số sau khi có LTV (GET /api/documents/:id/verify-signature)
+  console.log('88. Test Xác minh toàn diện chữ ký số hồ sơ PAdES B-LT GET /verify-signature:');
+  const resVerifyFullLtv = await fetch(`${API_BASE}/documents/${createdDocWithWf.id}/verify-signature`, {
+    headers: {
+      Authorization: `Bearer ${tokenUserA}`,
+    },
+  });
+  console.log(`   HTTP Status: ${resVerifyFullLtv.status}`);
+  if (resVerifyFullLtv.status !== 200) {
+    throw new Error('Test 88 thất bại: API verify-signature không thành công');
+  }
+  const bodyVerifyFullLtv = await resVerifyFullLtv.json();
+  console.log(`   Signature & LTV: isValid=${bodyVerifyFullLtv.data?.isValid}, hasTimestamp=${bodyVerifyFullLtv.data?.hasTimestamp}, hasLtv=${bodyVerifyFullLtv.data?.hasLtv}, padesLevel=${bodyVerifyFullLtv.data?.padesLevel}`);
+  if (
+    bodyVerifyFullLtv.data?.isValid !== true ||
+    bodyVerifyFullLtv.data?.isSignatureValid !== true ||
+    bodyVerifyFullLtv.data?.hasTimestamp !== true ||
+    bodyVerifyFullLtv.data?.hasLtv !== true ||
+    bodyVerifyFullLtv.data?.ltvValidationStatus !== 'VALID' ||
+    bodyVerifyFullLtv.data?.padesLevel !== 'PADES_B_LT'
+  ) {
+    throw new Error('Test 88 thất bại: Tài liệu không đạt đồng thời chữ ký hợp lệ, dấu thời gian và PAdES B-LT');
+  }
+  console.log('   -> PASS (Xác minh toàn diện chữ ký số PAdES B-LT thành công)\n');
+
+  // Test 89: Tenant Isolation trên LTV endpoints (Chặn 403 đối với Tenant Beta)
+  console.log('89. Test Tenant Isolation trên các endpoints LTV (add-ltv & verify-ltv):');
+  const resCrossTenantAddLtv = await fetch(`${API_BASE}/documents/${createdDocWithWf.id}/add-ltv`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenUserB}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({}),
+  });
+  console.log(`   Add-LTV cross-tenant status: ${resCrossTenantAddLtv.status}`);
+  if (resCrossTenantAddLtv.status !== 403) {
+    throw new Error('Test 89 thất bại: Không chặn 403 khi tenant khác cố bổ sung LTV');
+  }
+
+  const resCrossTenantVerifyLtv = await fetch(`${API_BASE}/documents/${createdDocWithWf.id}/verify-ltv`, {
+    headers: {
+      Authorization: `Bearer ${tokenUserB}`,
+    },
+  });
+  console.log(`   Verify-LTV cross-tenant status: ${resCrossTenantVerifyLtv.status}`);
+  if (resCrossTenantVerifyLtv.status !== 403) {
+    throw new Error('Test 89 thất bại: Không chặn 403 khi tenant khác cố xác minh LTV');
+  }
+  console.log('   -> PASS (Cách ly Tenant tuyệt đối trên các endpoints LTV)\n');
+
+  // Test 90: Tải tệp PDF PAdES B-LT qua GET /signed-pdf và kiểm tra cấu trúc /DSS
+  console.log('90. Test Tải tệp PDF PAdES B-LT có nhúng DSS / VRI GET /signed-pdf:');
+  const resDownloadLtvPdf = await fetch(`${API_BASE}/documents/${createdDocWithWf.id}/signed-pdf`, {
+    headers: {
+      Authorization: `Bearer ${tokenUserA}`,
+    },
+  });
+  console.log(`   HTTP Status: ${resDownloadLtvPdf.status}`);
+  if (resDownloadLtvPdf.status !== 200) {
+    throw new Error('Test 90 thất bại: Không tải được tệp PDF PAdES B-LT');
+  }
+  const ltvPdfBuf = Buffer.from(await resDownloadLtvPdf.arrayBuffer());
+  const ltvPdfAscii = ltvPdfBuf.toString('binary');
+  if (!ltvPdfAscii.includes('/DSS') || !ltvPdfAscii.includes('/Certs') || !ltvPdfAscii.includes('/OCSPs')) {
+    throw new Error('Test 90 thất bại: Tệp PDF tải về không chứa đầy đủ /DSS, /Certs hoặc /OCSPs');
+  }
+  console.log(`   Tải thành công PDF PAdES B-LT kích thước: ${ltvPdfBuf.length} bytes (Chứa đầy đủ /DSS, /Certs, /OCSPs)`);
+  console.log('   -> PASS (Tải và xác thực cấu trúc nhị phân PDF PAdES B-LT thành công)\n');
+
+  // --- BẮT ĐẦU KIỂM THỬ PHASE 13.4: WORKFLOW AUTO-SIGNING & PRODUCTION READINESS ---
+  console.log('--- BẮT ĐẦU KIỂM THỬ PHASE 13.4: WORKFLOW AUTO-SIGNING & PRODUCTION READINESS ---');
+
+  // Test 91: GET /api/documents/:id trả về signedPdfArtifact kèm siêu dữ liệu PAdES B-LT
+  console.log('91. Test GET /api/documents/:id trả về signedPdfArtifact kèm siêu dữ liệu PAdES B-LT:');
+  const resDocDetail = await fetch(`${API_BASE}/documents/${createdDocWithWf.id}`, {
+    headers: {
+      Authorization: `Bearer ${tokenUserA}`,
+    },
+  });
+  console.log(`   HTTP Status: ${resDocDetail.status}`);
+  if (resDocDetail.status !== 200) {
+    throw new Error('Test 91 thất bại: Không lấy được chi tiết hồ sơ');
+  }
+  const bodyDocDetail = await resDocDetail.json();
+  const signedArtifactView = bodyDocDetail.data?.signedPdfArtifact;
+  console.log(`   Signed Artifact View: ID=${signedArtifactView?.id}, padesLevel=${signedArtifactView?.padesLevel}, hasTimestamp=${signedArtifactView?.hasTimestamp}, hasLtv=${signedArtifactView?.hasLtv}`);
+  if (!signedArtifactView || signedArtifactView.padesLevel !== 'PADES_B_LT' || !signedArtifactView.hasLtv) {
+    throw new Error('Test 91 thất bại: signedPdfArtifact không đúng chuẩn PAdES B-LT');
+  }
+  console.log('   -> PASS (signedPdfArtifact trả về đầy đủ và chính xác trong chi tiết hồ sơ)\n');
+
+  // Test 92: Tự động niêm phong số PAdES B-LT khi hồ sơ hoàn tất phê duyệt (APPROVED)
+  console.log('92. Test Tự động niêm phong số PAdES B-LT khi hồ sơ hoàn tất phê duyệt (APPROVED):');
+  await prisma.digitalCertificate.deleteMany({
+    where: {
+      organizationId: userA.organizationId!,
+      userId: null,
+    },
+  });
+  const sealAliasE2E = `seal_alpha_corp_${Date.now()}`;
+  const sealKeystore = DevKeystoreGenerator.generateSelfSignedKeystore({
+    commonName: 'Con dau Dien tu Alpha Corp (Live E2E)',
+    organizationName: userA.organization?.name || 'Tập đoàn VinaGroup',
+  });
+  liveKeystoreProvider.importKeystore(sealAliasE2E, sealKeystore.p12Buffer);
+
+  const resRegOrgSeal = await fetch(`${API_BASE}/certificates`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenAdminA}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      userId: null,
+      certificatePem: sealKeystore.certificatePem,
+      keyAlias: sealAliasE2E,
+      keyStorageType: 'DEV_KEYSTORE',
+    }),
+  });
+  const bodyRegOrgSeal = await resRegOrgSeal.json();
+  const orgSealCertE2E = bodyRegOrgSeal.data;
+  console.log(`   Khởi tạo con dấu tổ chức Alpha: ${orgSealCertE2E?.id} (${orgSealCertE2E?.keyAlias})`);
+
+  // Tạo hồ sơ mới
+  const resCreateDocAutoSeal = await fetch(`${API_BASE}/documents`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenUserA}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      templateId: createdTplId,
+      workflowTemplateId: createdWfId,
+      title: 'Tờ trình tự động niêm phong số Phase 13.4',
+      formData: {
+        ten_thiet_bi: 'Workstation AI SuperCluster',
+        ngan_sach: 120000000,
+        ngay_can: '2026-12-01',
+        muc_dich: 'Triển khai niêm phong điện tử tự động trên quy trình phê duyệt',
+      },
+    }),
+  });
+  const bodyCreateDocAutoSeal = await resCreateDocAutoSeal.json();
+  const docAutoSeal = bodyCreateDocAutoSeal.data;
+
+  // Submit hồ sơ
+  await fetch(`${API_BASE}/documents/${docAutoSeal.id}/submit`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenUserA}`,
+    },
+  });
+
+  // Step 1: User A phê duyệt
+  const resApproveStep1 = await fetch(`${API_BASE}/documents/${docAutoSeal.id}/decision`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenUserA}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      decision: 'APPROVED',
+      decisionComment: 'Trưởng bộ phận phê duyệt bước 1',
+    }),
+  });
+  const bodyApproveStep1 = await resApproveStep1.json();
+  console.log(`   Duyệt Bước 1 status: ${resApproveStep1.status} | docStatus: ${bodyApproveStep1.data?.documentStatus}`);
+
+  // Step 2: Admin A phê duyệt -> APPROVED terminal state
+  const resApproveStep2 = await fetch(`${API_BASE}/documents/${docAutoSeal.id}/decision`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenAdminA}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      decision: 'APPROVED',
+      decisionComment: 'Ban Giám đốc phê duyệt chung, kích hoạt tự động niêm phong số.',
+    }),
+  });
+  const bodyApproveStep2 = await resApproveStep2.json();
+  console.log(`   Duyệt Bước 2 status: ${resApproveStep2.status} | docStatus: ${bodyApproveStep2.data?.documentStatus}`);
+
+  // Kiểm tra tệp SIGNED_PDF đã được tự động sinh qua GET /api/documents/:id
+  const resCheckAutoSealed = await fetch(`${API_BASE}/documents/${docAutoSeal.id}`, {
+    headers: {
+      Authorization: `Bearer ${tokenUserA}`,
+    },
+  });
+  const bodyCheckAutoSealed = await resCheckAutoSealed.json();
+  const autoSealedArtifact = bodyCheckAutoSealed.data?.signedPdfArtifact;
+  console.log(`   Auto-sealed Artifact: id=${autoSealedArtifact?.id}, padesLevel=${autoSealedArtifact?.padesLevel}, hasTimestamp=${autoSealedArtifact?.hasTimestamp}, hasLtv=${autoSealedArtifact?.hasLtv}`);
+  if (!autoSealedArtifact || autoSealedArtifact.padesLevel !== 'PADES_B_LT' || !autoSealedArtifact.hasLtv) {
+    throw new Error('Test 92 thất bại: Hồ sơ APPROVED chưa được tự động niêm phong PAdES B-LT');
+  }
+  console.log('   -> PASS (Quy trình duyệt hồ sơ tự động niêm phong PAdES B-LT thành công)\n');
+
+  // Test 93: Thông báo DOCUMENT_APPROVED được phát sinh tự động kèm link download
+  console.log('93. Test Thông báo DOCUMENT_APPROVED được phát sinh tự động kèm link download:');
+  const autoSealNotif = await prisma.notification.findFirst({
+    where: {
+      documentId: docAutoSeal.id,
+      type: 'DOCUMENT_APPROVED',
+    },
+  });
+  console.log(`   Notification found: ID=${autoSealNotif?.id}, Title="${autoSealNotif?.title}"`);
+  const meta: any = autoSealNotif?.metadata || {};
+  console.log(`   Notification downloadUrl: ${meta?.downloadUrl}`);
+  if (!autoSealNotif || !meta?.downloadUrl || !meta?.downloadUrl.includes('type=SIGNED_PDF')) {
+    throw new Error('Test 93 thất bại: Không tìm thấy thông báo DOCUMENT_APPROVED kèm downloadUrl');
+  }
+  console.log('   -> PASS (Thông báo DOCUMENT_APPROVED chứa link download /pdf?type=SIGNED_PDF chuẩn xác)\n');
+
   await prisma.$disconnect();
   console.log('========================================================================');
-  console.log('🎉 TẤT CẢ 85/85 KỊCH BẢN KIỂM THỬ LIVE HTTP & SECURITY TRÊN POSTGRESQL');
+  console.log('🎉 TẤT CẢ 93/93 KỊCH BẢN KIỂM THỬ LIVE HTTP & SECURITY TRÊN POSTGRESQL');
   console.log('   (BAO GỒM REASSIGNMENT, SLA SCHEDULER, NOTIFICATION, DELEGATION,');
   console.log('    PHASE 13.1 PDF ARTIFACT STORAGE, PHASE 13.2.1 CERTIFICATE KEYSTORE,');
-  console.log('    PHASE 13.2.2 CMS/PDF SIGNING ENGINE VÀ PHASE 13.3.1 RFC 3161 TSA)');
+  console.log('    PHASE 13.2.2 CMS/PDF SIGNING ENGINE, PHASE 13.3.1 RFC 3161 TSA,');
+  console.log('    PHASE 13.3.2 PAdES B-LT, DSS/VRI & LONG-TERM VALIDATION');
+  console.log('    VÀ PHASE 13.4 WORKFLOW AUTO-SIGNING & PRODUCTION READINESS)');
   console.log('   ĐÃ PASS 100%!');
   console.log('========================================================================');
 }
