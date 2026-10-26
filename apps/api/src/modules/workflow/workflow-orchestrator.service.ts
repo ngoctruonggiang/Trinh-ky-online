@@ -3,8 +3,10 @@ import { PrismaClient, Prisma, TemplateStatus } from '@prisma/client';
 import {
   BadRequestException,
   ForbiddenException,
+  InternalServerErrorException,
   NotFoundException,
 } from '@nestjs/common';
+import { UserPrincipal } from '../../common/interfaces/user-principal.interface.js';
 import {
   AssigneeDecision,
   AssigneeRole,
@@ -732,7 +734,10 @@ export class WorkflowOrchestratorService {
                   type: 'DOCUMENT_APPROVED',
                   title: 'Hồ sơ đã được phê duyệt',
                   content: `Hồ sơ "${document.title}" đã hoàn tất tất cả các bước phê duyệt thành công.`,
-                  metadata: { completedAt: now.toISOString() },
+                  metadata: {
+                    completedAt: now.toISOString(),
+                    downloadUrl: `/api/documents/${document.id}/pdf?type=SIGNED_PDF`,
+                  },
                 },
               });
             }
@@ -837,6 +842,37 @@ export class WorkflowOrchestratorService {
     }
 
     return result;
+  }
+
+  /**
+   * Reconciliation: Tái xử lý niêm phong số cho hồ sơ đã APPROVED nhưng chưa có SIGNED_PDF artifact
+   * Dùng cho operational recovery khi auto-sealing gặp lỗi tạm thời (TSA timeout, keystore glitch, storage outage)
+   */
+  public async reconcileUnsealedApprovedDocument(
+    documentId: string,
+    actor: UserPrincipal
+  ) {
+    const document = await this.prisma.document.findUnique({
+      where: { id: documentId },
+    });
+
+    if (!document) {
+      throw new NotFoundException('Hồ sơ không tồn tại');
+    }
+
+    if (document.organizationId !== actor.organizationId) {
+      throw new ForbiddenException('Không có quyền truy cập hồ sơ của tổ chức khác');
+    }
+
+    if (document.status !== DocumentStatus.APPROVED) {
+      throw new BadRequestException('Chỉ có thể niêm phong số cho hồ sơ đã hoàn tất phê duyệt (APPROVED)');
+    }
+
+    if (!this.pdfSigningService) {
+      throw new InternalServerErrorException('Dịch vụ ký số PDF chưa được tích hợp');
+    }
+
+    return await this.pdfSigningService.autoSealApprovedDocument(documentId, actor);
   }
 
   /**

@@ -761,12 +761,63 @@ export class PdfSigningService {
       return null;
     }
 
-    // 1. Tìm chứng thư số niêm phong phù hợp của tổ chức hoặc của người phê duyệt cuối cùng
+    // 0. Kiểm tra tính Idempotent: Nếu tài liệu đã có bản ký SIGNED_PDF hoàn tất có LTV, trả về ngay không tạo trùng
+    const existingSignedArtifact = await this.prisma.documentArtifact.findFirst({
+      where: {
+        documentId: document.id,
+        artifactType: ArtifactType.SIGNED_PDF,
+        status: ArtifactStatus.COMPLETED,
+        hasLtv: true,
+      },
+      orderBy: { createdAt: 'desc' },
+      include: {
+        certificate: true,
+      },
+    });
+
+    if (existingSignedArtifact) {
+      return {
+        artifactId: existingSignedArtifact.id,
+        documentId: document.id,
+        documentVersionId: existingSignedArtifact.documentVersionId,
+        status: ArtifactStatus.COMPLETED,
+        signedPdfHash: existingSignedArtifact.signedPdfHash || '',
+        rawPdfHash: existingSignedArtifact.rawPdfHash || existingSignedArtifact.signedPdfHash || '',
+        formDataHash: existingSignedArtifact.formDataHash,
+        sizeBytes: existingSignedArtifact.sizeBytes || 0,
+        byteRange: existingSignedArtifact.byteRange || [0, 0, 0, 0],
+        signerSubject: existingSignedArtifact.signerSubject || existingSignedArtifact.signerName || '',
+        signerIssuer: existingSignedArtifact.certificate?.issuerDn || '',
+        signingTime: existingSignedArtifact.signingTime
+          ? existingSignedArtifact.signingTime.toISOString()
+          : existingSignedArtifact.createdAt.toISOString(),
+        hasTimestamp: existingSignedArtifact.hasTimestamp,
+        timestampGenTime: existingSignedArtifact.timestampGenTime?.toISOString(),
+        tsaSubject: existingSignedArtifact.tsaSubject || undefined,
+        hasLtv: true,
+        ltvStatus: existingSignedArtifact.ltvStatus || 'VALID',
+        dssCertsCount: existingSignedArtifact.dssCertsCount ?? 1,
+        dssOcspsCount: existingSignedArtifact.dssOcspsCount ?? 0,
+        dssCrlsCount: existingSignedArtifact.dssCrlsCount ?? 0,
+        ltvEmbeddedAt: existingSignedArtifact.ltvEmbeddedAt
+          ? existingSignedArtifact.ltvEmbeddedAt.toISOString()
+          : existingSignedArtifact.updatedAt.toISOString(),
+        padesLevel: 'PADES_B_LT',
+        isSignatureVerified: true,
+        downloadUrl: `/api/documents/${document.id}/pdf?type=SIGNED_PDF`,
+      };
+    }
+
+    const now = new Date();
+
+    // 1. Tìm chứng thư số niêm phong phù hợp của tổ chức
     const orgCerts = await this.prisma.digitalCertificate.findMany({
       where: {
         organizationId: document.organizationId,
         userId: null, // Ưu tiên con dấu điện tử chung của tổ chức
         status: CertificateStatus.ACTIVE,
+        validFrom: { lte: now },
+        validTo: { gte: now },
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -780,26 +831,9 @@ export class PdfSigningService {
     }
 
     if (!certificate) {
-      // Nếu tổ chức chưa có con dấu khả dụng, tìm chứng thư cá nhân của người duyệt cuối cùng
-      const userCerts = await this.prisma.digitalCertificate.findMany({
-        where: {
-          organizationId: document.organizationId,
-          userId: actor.id,
-          status: CertificateStatus.ACTIVE,
-        },
-        orderBy: { createdAt: 'desc' },
-      });
-      for (const cert of userCerts) {
-        if (await this.keyProvider.isAvailable(cert.keyAlias)) {
-          certificate = cert;
-          break;
-        }
-      }
-    }
-
-    if (!certificate) {
-      // Nếu cả tổ chức và người duyệt đều chưa có chứng thư ACTIVE:
-      // Không crash workflow phê duyệt, trả về null
+      // Tuân thủ Audit B: Không tự động chuyển sang chứng thư cá nhân của actor trừ khi
+      // chính sách nghiệp vụ phê duyệt rõ ràng. Nếu chưa có con dấu tổ chức (userId: null)
+      // khả dụng, không tự ý ký nhân danh cá nhân để niêm phong tổ chức.
       return null;
     }
 

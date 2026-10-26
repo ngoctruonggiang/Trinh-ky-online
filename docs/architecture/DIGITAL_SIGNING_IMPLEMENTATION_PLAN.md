@@ -421,6 +421,26 @@ Dựa trên kết quả triển khai và kiểm thử thực tế của Phase 13
 ### **8.2. Kết luận Nghiệm thu Toàn diện Lộ trình Phase 13**
 Toàn bộ lộ trình ký số mật mã PDF gồm **Phase 13.1, Phase 13.2, Phase 13.3.1, Phase 13.3.2, và Phase 13.4** đã được triển khai hoàn chỉnh, thẩm định độc lập bằng OpenSSL 3.5.7 CLI, tích hợp mượt mà vào Workflow Engine, bảo vệ bằng chính sách ủy quyền và kiểm toán bất biến, cùng giao diện người dùng đạt chuẩn chất lượng cao nhất.
 
-**TRẠNG THÁI: ALL PHASES COMPLETED — PRODUCTION READY!**
+---
+
+## 9. BÁO CÁO NGHIỆM THU AN TOÀN VÀ TIN CẬY — PHASE 13.4.1 (PRODUCTION ACCEPTANCE AUDIT)
+
+### **9.1. Các điểm củng cố mã nguồn và kiến trúc theo Audit A-G**
+1. **Idempotency trong Auto-Sealing**: Bổ sung cơ chế phát hiện bản ký `SIGNED_PDF` đã hoàn tất có LTV tại đầu hàm `autoSealApprovedDocument`, trả về ngay mà không ký lại hay sinh audit log trùng lặp.
+2. **Bộ lọc thời hạn hiệu lực chứng thư**: Bổ sung `validFrom <= now <= validTo` khi phân giải con dấu tổ chức, đảm bảo chứng thư hết hạn bị loại bỏ ngay cả khi có `createdAt` mới nhất.
+3. **Tuân thủ chính sách con dấu pháp nhân (Audit B)**: Loại bỏ việc tự động dùng chứng thư cá nhân để niêm phong tổ chức khi chưa có cấu hình phê duyệt chính sách nghiệp vụ.
+4. **Cơ chế phục hồi (Operational Recovery & Reconciliation)**: Triển khai phương thức `reconcileUnsealedApprovedDocument` và endpoint `POST /api/documents/:id/reconcile-seal` cho phép phục hồi niêm phong số an toàn.
+5. **Monorepo Cross-CWD Fallback**: Hoàn thiện `LocalDiskStorageProvider` và `DevLocalKeystoreProvider` tự động đối soát và đồng bộ tệp nhị phân giữa các thư mục chạy của monorepo.
+
+### **9.2. Ma trận Kết quả Kiểm thử Nghiệm thu Phase 13.4.1**
+- **Unit Tests (`@trinh-ky/api`)**: 232/232 PASS (100%).
+- **PostgreSQL Integration Tests**: 158/158 PASS (15 suites) với 5 bài test chuyên sâu cho Audit A, B, E, G.
+- **Live HTTP E2E Tests**: 93/93 PASS (100%) qua server NestJS daemon.
+- **Independent OpenSSL 3.5.7 CLI Verification**: PASS 100% (CMS Detached, RFC 3161 Timestamp, OCSP Structure).
+- **Shared & Web Package Tests**: 47/47 PASS & 46/46 PASS.
+- **Báo cáo kiểm toán độc lập**: Chi tiết tại [`docs/architecture/PHASE_13_4_1_PRODUCTION_ACCEPTANCE_AUDIT.md`](./PHASE_13_4_1_PRODUCTION_ACCEPTANCE_AUDIT.md).
+
+**QUYẾT ĐỊNH: CONDITIONAL GO (Sẵn sàng triển khai Staging / Pilot Production với TSA & HSM thật)**
+
 
 

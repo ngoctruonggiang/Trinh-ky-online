@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import * as crypto from 'crypto';
 import { PrismaClient, UserRole } from '@prisma/client';
+import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import {
   ArtifactStatus,
   ArtifactType,
@@ -550,5 +551,212 @@ describe('Phase 13.4: Workflow Auto-Signing Integration & Production Readiness (
     });
     expect(detail.status).toBe(DocumentStatus.APPROVED);
     expect(detail.signedPdfArtifact).toBeUndefined();
+  });
+
+  it('4. Tính Idempotent: Gọi autoSealApprovedDocument lần 2 trả về kết quả ngay mà không ký lại', async () => {
+    const approvedDoc = await prisma.document.findFirst({
+      where: { organizationId: orgAlpha.id, status: DocumentStatus.APPROVED },
+    });
+    expect(approvedDoc).toBeDefined();
+
+    const auditCountBefore = await prisma.auditLog.count({
+      where: { documentId: approvedDoc!.id, action: AuditAction.DOCUMENT_SIGN_PDF },
+    });
+    const artifactCountBefore = await prisma.documentArtifact.count({
+      where: { documentId: approvedDoc!.id, artifactType: ArtifactType.SIGNED_PDF },
+    });
+
+    const secondSealResult = await pdfSigningService.autoSealApprovedDocument(
+      approvedDoc!.id,
+      principalCreator
+    );
+
+    expect(secondSealResult).toBeDefined();
+    expect(secondSealResult!.hasLtv).toBe(true);
+    expect(secondSealResult!.padesLevel).toBe('PADES_B_LT');
+
+    // Không sinh thêm audit log ký số trùng lặp
+    const auditCountAfter = await prisma.auditLog.count({
+      where: { documentId: approvedDoc!.id, action: AuditAction.DOCUMENT_SIGN_PDF },
+    });
+    expect(auditCountAfter).toBe(auditCountBefore);
+
+    // Không sinh thêm artifact trùng lặp
+    const artifactCountAfter = await prisma.documentArtifact.count({
+      where: { documentId: approvedDoc!.id, artifactType: ArtifactType.SIGNED_PDF },
+    });
+    expect(artifactCountAfter).toBe(artifactCountBefore);
+  });
+
+  it('5. Audit B: Bỏ qua chứng thư số hết hạn (Expired Cert Filtering) và chọn đúng con dấu hợp lệ', async () => {
+    // Tạo 1 chứng thư hết hạn có createdAt mới hơn orgSealCert
+    const expiredAlias = `expired_seal_${Date.now()}`;
+    const keystoreExpired = DevKeystoreGenerator.generateSelfSignedKeystore({
+      commonName: 'Con dau Cu Da Het Han Alpha Corp',
+      organizationName: orgAlpha.name,
+      passphrase: 'OrgSealPass2026!',
+    });
+    keystoreProvider.importKeystore(expiredAlias, keystoreExpired.p12Buffer, 'OrgSealPass2026!');
+
+    const expiredCert = await prisma.digitalCertificate.create({
+      data: {
+        organizationId: orgAlpha.id,
+        userId: null,
+        keyAlias: expiredAlias,
+        keyStorageType: KeyStorageType.DEV_KEYSTORE,
+        subjectDn: keystoreExpired.subjectDn,
+        issuerDn: keystoreExpired.issuerDn,
+        serialNumber: keystoreExpired.serialNumber,
+        fingerprintSha256: keystoreExpired.fingerprintSha256,
+        certificatePem: keystoreExpired.certificatePem,
+        validFrom: new Date('2020-01-01T00:00:00Z'),
+        validTo: new Date('2021-01-01T00:00:00Z'), // Đã hết hạn
+        status: CertificateStatus.ACTIVE,
+        createdAt: new Date(Date.now() + 60000), // Mới hơn orgSealCert
+      },
+    });
+
+    // Tạo hồ sơ mới và hoàn tất phê duyệt
+    const newDoc = await orchestratorService.createDocument({
+      templateId: templateAlpha.id,
+      title: 'Hồ sơ kiểm thử lọc chứng thư hết hạn',
+      formData: { projectName: 'Dự án lọc chứng thư', budget: 100000, reason: 'Test' },
+      userId: creator.id,
+      userOrganizationId: orgAlpha.id,
+      userRole: UserRole.USER,
+    });
+    await orchestratorService.submitDocument({ documentId: newDoc.id, userId: creator.id });
+    await orchestratorService.processAssigneeDecision({
+      documentId: newDoc.id,
+      userId: manager.id,
+      decision: AssigneeDecision.APPROVED,
+    });
+    await orchestratorService.processAssigneeDecision({
+      documentId: newDoc.id,
+      userId: director.id,
+      decision: AssigneeDecision.APPROVED,
+    });
+
+    // Kiểm tra bản ghi artifact đã ký: Phải dùng orgSealCert (chứng thư còn hạn), KHÔNG dùng expiredCert
+    const signedArtifact = await prisma.documentArtifact.findFirst({
+      where: { documentId: newDoc.id, artifactType: ArtifactType.SIGNED_PDF },
+    });
+    expect(signedArtifact).toBeDefined();
+    expect(signedArtifact!.certificateId).toBe(orgSealCert.id);
+    expect(signedArtifact!.certificateId).not.toBe(expiredCert.id);
+  });
+
+  it('6. Operational Recovery: Reconcile niêm phong số cho hồ sơ APPROVED khi chứng thư được bổ sung', async () => {
+    // docNoCert ở Test 3 đã APPROVED nhưng chưa có con dấu
+    const unsealedDoc = await prisma.document.findFirst({
+      where: { organizationId: orgNoCert.id, status: DocumentStatus.APPROVED },
+    });
+    expect(unsealedDoc).toBeDefined();
+
+    // Bổ sung con dấu hợp lệ cho orgNoCert
+    const noCertSealAlias = `nocert_seal_${Date.now()}`;
+    const keystoreNoCertSeal = DevKeystoreGenerator.generateSelfSignedKeystore({
+      commonName: 'Con dau Cong ty NoCert',
+      organizationName: orgNoCert.name,
+      passphrase: 'OrgSealPass2026!',
+    });
+    keystoreProvider.importKeystore(noCertSealAlias, keystoreNoCertSeal.p12Buffer, 'OrgSealPass2026!');
+
+    await prisma.digitalCertificate.create({
+      data: {
+        organizationId: orgNoCert.id,
+        userId: null,
+        keyAlias: noCertSealAlias,
+        keyStorageType: KeyStorageType.DEV_KEYSTORE,
+        subjectDn: keystoreNoCertSeal.subjectDn,
+        issuerDn: keystoreNoCertSeal.issuerDn,
+        serialNumber: keystoreNoCertSeal.serialNumber,
+        fingerprintSha256: keystoreNoCertSeal.fingerprintSha256,
+        certificatePem: keystoreNoCertSeal.certificatePem,
+        validFrom: keystoreNoCertSeal.validFrom,
+        validTo: keystoreNoCertSeal.validTo,
+        status: CertificateStatus.ACTIVE,
+      },
+    });
+
+    // Thực hiện Reconciliation thông qua orchestratorService
+    const principalApproverNoCert: UserPrincipal = {
+      id: approverNoCert.id,
+      email: approverNoCert.email,
+      fullName: approverNoCert.fullName,
+      role: UserRole.USER,
+      organizationId: orgNoCert.id,
+      departmentId: null,
+    };
+
+    const reconcileResult = await orchestratorService.reconcileUnsealedApprovedDocument(
+      unsealedDoc!.id,
+      principalApproverNoCert
+    );
+
+    expect(reconcileResult).toBeDefined();
+    expect(reconcileResult!.hasLtv).toBe(true);
+    expect(reconcileResult!.padesLevel).toBe('PADES_B_LT');
+
+    // CSDL giờ đây đã có SIGNED_PDF artifact
+    const artifactAfterReconcile = await prisma.documentArtifact.findFirst({
+      where: { documentId: unsealedDoc!.id, artifactType: ArtifactType.SIGNED_PDF },
+    });
+    expect(artifactAfterReconcile).toBeDefined();
+    expect(artifactAfterReconcile!.status).toBe(ArtifactStatus.COMPLETED);
+    expect(artifactAfterReconcile!.hasLtv).toBe(true);
+  });
+
+  it('7. Audit G: Chặn truy cập và xác minh chéo tổ chức (Multi-Tenant Isolation)', async () => {
+    const approvedDoc = await prisma.document.findFirst({
+      where: { organizationId: orgAlpha.id, status: DocumentStatus.APPROVED },
+    });
+    expect(approvedDoc).toBeDefined();
+
+    const crossTenantUser: UserPrincipal = {
+      id: creatorNoCert.id,
+      email: creatorNoCert.email,
+      fullName: creatorNoCert.fullName,
+      role: UserRole.USER,
+      organizationId: orgNoCert.id, // Khác orgAlpha
+      departmentId: null,
+    };
+
+    // Chặn verifyDocumentSignature chéo tenant
+    await expect(
+      pdfSigningService.verifyDocumentSignature(approvedDoc!.id, {}, crossTenantUser)
+    ).rejects.toThrow(ForbiddenException);
+
+    // Chặn getDocumentDetail chéo tenant
+    await expect(
+      documentReadService.getDocumentDetail(approvedDoc!.id, crossTenantUser)
+    ).rejects.toThrow();
+  });
+
+  it('8. Audit E: Xử lý an toàn khi tệp trong Storage bị thiếu nhưng bản ghi CSDL tồn tại', async () => {
+    const approvedDoc = await prisma.document.findFirst({
+      where: { organizationId: orgAlpha.id, status: DocumentStatus.APPROVED },
+    });
+    const artifact = await prisma.documentArtifact.findFirst({
+      where: { documentId: approvedDoc!.id, artifactType: ArtifactType.SIGNED_PDF },
+    });
+    expect(artifact).toBeDefined();
+
+    // Giả lập storage key trỏ đến tệp không tồn tại
+    const backupKey = artifact!.storageKey!;
+    await prisma.documentArtifact.update({
+      where: { id: artifact!.id },
+      data: { storageKey: 'missing-storage-path/non-existent-signed.pdf' },
+    });
+
+    await expect(
+      pdfSigningService.verifyDocumentSignature(approvedDoc!.id, {}, principalCreator)
+    ).rejects.toThrow(NotFoundException);
+
+    // Phục hồi lại storageKey
+    await prisma.documentArtifact.update({
+      where: { id: artifact!.id },
+      data: { storageKey: backupKey },
+    });
   });
 });

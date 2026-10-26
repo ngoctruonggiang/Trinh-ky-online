@@ -327,4 +327,22 @@ export class DocumentWorkflowController {
       timestamp: new Date().toISOString(),
     };
   }
+
+  /**
+   * 6. Phục hồi và niêm phong số cho hồ sơ đã hoàn tất duyệt (Reconciliation)
+   * POST /api/documents/:id/reconcile-seal
+   */
+  @Post(':id/reconcile-seal')
+  @HttpCode(HttpStatus.OK)
+  async reconcileSeal(
+    @Param('id') id: string,
+    @CurrentUser() user: UserPrincipal
+  ) {
+    const result = await this.orchestrator.reconcileUnsealedApprovedDocument(id, user);
+    return {
+      success: true,
+      data: result,
+      timestamp: new Date().toISOString(),
+    };
+  }
 }

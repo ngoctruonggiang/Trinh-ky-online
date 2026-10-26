@@ -70,6 +70,23 @@ export class DevLocalKeystoreProvider implements ISigningKeyProvider {
     if (!resolved.startsWith(this.keystoreDir)) {
       throw new BadRequestException('Phát hiện hành vi Path Traversal trái phép.');
     }
+
+    if (!fs.existsSync(resolved)) {
+      // Hỗ trợ kiểm thử liên tiến trình khi server và test runner chạy từ các cwd khác nhau (apps/api vs monorepo root)
+      const altDirs = [
+        path.resolve(process.cwd(), 'apps', 'api', 'storage', 'keystores', 'dev'),
+        path.resolve(process.cwd(), 'storage', 'keystores', 'dev'),
+        path.resolve(process.cwd(), '..', 'storage', 'keystores', 'dev'),
+        path.resolve(process.cwd(), '..', 'apps', 'api', 'storage', 'keystores', 'dev'),
+      ];
+      for (const altDir of altDirs) {
+        const altPath = path.resolve(altDir, `${keyAlias}.p12`);
+        if (fs.existsSync(altPath)) {
+          return altPath;
+        }
+      }
+    }
+
     return resolved;
   }
 
@@ -217,6 +234,23 @@ export class DevLocalKeystoreProvider implements ISigningKeyProvider {
     const tempPath = `${targetPath}.tmp_${Date.now()}`;
     fs.writeFileSync(tempPath, p12Buffer, { mode: 0o600 });
     fs.renameSync(tempPath, targetPath);
+
+    // Đồng bộ sang thư mục tương đương nếu chạy trong môi trường monorepo
+    const altTargetPaths = [
+      path.resolve(process.cwd(), 'apps', 'api', 'storage', 'keystores', 'dev', `${keyAlias}.p12`),
+      path.resolve(process.cwd(), '..', 'storage', 'keystores', 'dev', `${keyAlias}.p12`),
+      path.resolve(process.cwd(), 'storage', 'keystores', 'dev', `${keyAlias}.p12`),
+    ];
+    for (const altPath of altTargetPaths) {
+      try {
+        const altDir = path.dirname(altPath);
+        if (fs.existsSync(altDir) && altPath !== targetPath) {
+          fs.writeFileSync(altPath, p12Buffer, { mode: 0o600 });
+        }
+      } catch {
+        // Ignore fallback sync errors
+      }
+    }
 
     if (passphrase) {
       this.passphraseCache.set(keyAlias, passphrase);
