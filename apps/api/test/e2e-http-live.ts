@@ -1937,12 +1937,143 @@ async function runLiveTests() {
   }
   console.log('   -> PASS (Xử lý Idempotency hoàn hảo: Cập nhật chữ ký số an toàn, không sinh artifact trùng lặp)\n');
 
+  // Test 81: RFC 3161 Trusted Timestamping - Ký số tài liệu với cờ requireTimestamp: true
+  console.log('81. Test RFC 3161 Trusted Timestamping: Ký số PDF yêu cầu dấu thời gian tin cậy (requireTimestamp: true):');
+  const resSignWithTs = await fetch(`${API_BASE}/documents/${createdDocWithWf.id}/sign`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenUserA}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      certificateId: activeCertA.id,
+      reason: 'Phê duyệt hợp đồng với dấu thời gian RFC 3161',
+      location: 'Hà Nội, Việt Nam',
+      requireTimestamp: true,
+    }),
+  });
+  const bodySignWithTs = await resSignWithTs.json();
+  console.log(`   HTTP Status: ${resSignWithTs.status} | hasTimestamp: ${bodySignWithTs.data?.hasTimestamp} | TSA: ${bodySignWithTs.data?.tsaSubject}`);
+  if (
+    resSignWithTs.status !== 200 ||
+    bodySignWithTs.data?.hasTimestamp !== true ||
+    !bodySignWithTs.data?.timestampGenTime ||
+    !bodySignWithTs.data?.tsaSubject
+  ) {
+    throw new Error('Test 81 thất bại: Ký PDF với requireTimestamp: true không tạo ra TimeStampToken hợp lệ');
+  }
+
+  // Kiểm tra CSDL DocumentArtifact lưu trữ đầy đủ metadata timestamp
+  const artifactWithTs = await prisma.documentArtifact.findFirst({
+    where: {
+      documentId: createdDocWithWf.id,
+      artifactType: 'SIGNED_PDF',
+    },
+  });
+  if (
+    !artifactWithTs ||
+    artifactWithTs.hasTimestamp !== true ||
+    !artifactWithTs.timestampGenTime ||
+    !artifactWithTs.tsaSubject ||
+    !artifactWithTs.tsaSerialNumber ||
+    !artifactWithTs.tsaPolicyOid
+  ) {
+    throw new Error('Test 81 thất bại: CSDL DocumentArtifact không lưu đầy đủ metadata dấu thời gian RFC 3161');
+  }
+  console.log('   -> PASS (Ký PDF thành công với RFC 3161 TimeStampToken và lưu metadata CSDL chuẩn hóa)\n');
+
+  // Test 82: Xác minh độc lập chữ ký số có TimeStampToken qua HTTP API
+  console.log('82. Test Xác minh độc lập chữ ký PDF kèm TimeStampToken qua API GET /verify-signature:');
+  const resVerifyWithTs = await fetch(`${API_BASE}/documents/${createdDocWithWf.id}/verify-signature`, {
+    headers: {
+      Authorization: `Bearer ${tokenUserA}`,
+    },
+  });
+  const bodyVerifyWithTs = await resVerifyWithTs.json();
+  console.log(
+    `   HTTP Status: ${resVerifyWithTs.status} | isValid: ${bodyVerifyWithTs.data?.isValid} | hasTimestamp: ${bodyVerifyWithTs.data?.hasTimestamp} | isTimestampValid: ${bodyVerifyWithTs.data?.isTimestampValid}`
+  );
+  if (
+    resVerifyWithTs.status !== 200 ||
+    bodyVerifyWithTs.data?.isValid !== true ||
+    bodyVerifyWithTs.data?.isTampered !== false ||
+    bodyVerifyWithTs.data?.hasTimestamp !== true ||
+    bodyVerifyWithTs.data?.isTimestampValid !== true ||
+    !bodyVerifyWithTs.data?.timestampGenTime
+  ) {
+    throw new Error('Test 82 thất bại: API xác minh chữ ký không xác thực được TimeStampToken hợp lệ');
+  }
+  console.log('   -> PASS (API xác minh toàn diện chữ ký RSA và TimeStampToken RFC 3161 thành công)\n');
+
+  // Test 83: Tải tệp PDF đã ký có TimeStampToken qua HTTP API
+  console.log('83. Test Tải tệp PDF đã ký có dấu thời gian GET /signed-pdf:');
+  const resDownloadTsPdf = await fetch(`${API_BASE}/documents/${createdDocWithWf.id}/signed-pdf`, {
+    headers: {
+      Authorization: `Bearer ${tokenUserA}`,
+    },
+  });
+  console.log(`   HTTP Status: ${resDownloadTsPdf.status} | Content-Type: ${resDownloadTsPdf.headers.get('content-type')}`);
+  if (resDownloadTsPdf.status !== 200) {
+    throw new Error('Test 83 thất bại: Không tải được tệp PDF đã ký có timestamp');
+  }
+  const downloadedBuf = Buffer.from(await resDownloadTsPdf.arrayBuffer());
+  if (downloadedBuf.subarray(0, 5).toString('ascii') !== '%PDF-') {
+    throw new Error('Test 83 thất bại: Tệp tải về không có magic bytes %PDF-');
+  }
+  if (!downloadedBuf.includes(Buffer.from('/ByteRange')) || !downloadedBuf.includes(Buffer.from('/Contents'))) {
+    throw new Error('Test 83 thất bại: Tệp PDF không chứa ByteRange hoặc Contents');
+  }
+  console.log(`   Tải thành công PDF kích thước: ${downloadedBuf.length} bytes`);
+  console.log('   -> PASS (Tải tệp PDF đã ký có RFC 3161 TimeStampToken thành công)\n');
+
+  // Test 84: Input Validation - Chặn requireTimestamp sai định dạng kiểu dữ liệu
+  console.log('84. Test Input Validation: Chặn requireTimestamp sai kiểu boolean:');
+  const resInvalidReqTs = await fetch(`${API_BASE}/documents/${createdDocWithWf.id}/sign`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenUserA}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      certificateId: activeCertA.id,
+      requireTimestamp: 'not_a_boolean',
+    }),
+  });
+  console.log(`   HTTP Status: ${resInvalidReqTs.status}`);
+  if (resInvalidReqTs.status !== 400) {
+    throw new Error('Test 84 thất bại: Không chặn 400 khi requireTimestamp không phải boolean');
+  }
+  console.log('   -> PASS (Validation Pipe chặn thành công dữ liệu requireTimestamp không hợp lệ)\n');
+
+  // Test 85: Tenant Isolation trên tệp PDF đã ký có timestamp
+  console.log('85. Test Tenant Isolation trên tài liệu đã ký có RFC 3161 Timestamp:');
+  const resCrossTenantVerify = await fetch(`${API_BASE}/documents/${createdDocWithWf.id}/verify-signature`, {
+    headers: {
+      Authorization: `Bearer ${tokenUserB}`,
+    },
+  });
+  console.log(`   Verify cross-tenant status: ${resCrossTenantVerify.status}`);
+  if (resCrossTenantVerify.status !== 403) {
+    throw new Error('Test 85 thất bại: Không chặn 403 khi tenant khác cố xác minh chữ ký');
+  }
+
+  const resCrossTenantDownload = await fetch(`${API_BASE}/documents/${createdDocWithWf.id}/signed-pdf`, {
+    headers: {
+      Authorization: `Bearer ${tokenUserB}`,
+    },
+  });
+  console.log(`   Download cross-tenant status: ${resCrossTenantDownload.status}`);
+  if (resCrossTenantDownload.status !== 403) {
+    throw new Error('Test 85 thất bại: Không chặn 403 khi tenant khác cố tải PDF đã ký');
+  }
+  console.log('   -> PASS (Cách ly Tenant tuyệt đối trên các tài liệu đã ký số có dấu thời gian)\n');
+
   await prisma.$disconnect();
   console.log('========================================================================');
-  console.log('🎉 TẤT CẢ 80/80 KỊCH BẢN KIỂM THỬ LIVE HTTP & SECURITY TRÊN POSTGRESQL');
+  console.log('🎉 TẤT CẢ 85/85 KỊCH BẢN KIỂM THỬ LIVE HTTP & SECURITY TRÊN POSTGRESQL');
   console.log('   (BAO GỒM REASSIGNMENT, SLA SCHEDULER, NOTIFICATION, DELEGATION,');
-  console.log('    PHASE 13.1 PDF ARTIFACT STORAGE, PHASE 13.2.1 CERTIFICATE KEYSTORE');
-  console.log('    VÀ PHASE 13.2.2 CMS/PDF SIGNING ENGINE)');
+  console.log('    PHASE 13.1 PDF ARTIFACT STORAGE, PHASE 13.2.1 CERTIFICATE KEYSTORE,');
+  console.log('    PHASE 13.2.2 CMS/PDF SIGNING ENGINE VÀ PHASE 13.3.1 RFC 3161 TSA)');
   console.log('   ĐÃ PASS 100%!');
   console.log('========================================================================');
 }

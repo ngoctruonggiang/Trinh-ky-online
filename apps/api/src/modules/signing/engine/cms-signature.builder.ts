@@ -1,6 +1,11 @@
 import * as crypto from 'crypto';
 import * as forge from 'node-forge';
 import { ISigningKeyProvider } from '../providers/signing-key-provider.interface.js';
+import {
+  ITimestampAuthorityProvider,
+  TimestampTokenResult,
+} from '../timestamp/timestamp.interface.js';
+import { OID_ID_AA_SIGNATURE_TIMESTAMP_TOKEN } from '../timestamp/timestamp-token.verifier.js';
 
 export interface BuildCmsSignatureOptions {
   /** Mã băm SHA-256 (32 byte) của vùng dữ liệu ByteRange */
@@ -17,6 +22,10 @@ export interface BuildCmsSignatureOptions {
   keyProvider: ISigningKeyProvider;
   /** Chuẩn phụ: adbe.pkcs7.detached hoặc ETSI.CAdES.detached */
   subFilter?: 'adbe.pkcs7.detached' | 'ETSI.CAdES.detached';
+  /** Nhà cung cấp dấu thời gian RFC 3161 TSA (tùy chọn) */
+  tsaProvider?: ITimestampAuthorityProvider;
+  /** Yêu cầu bắt buộc dấu thời gian tin cậy (mặc định false) */
+  requireTimestamp?: boolean;
 }
 
 export interface CmsSignatureResult {
@@ -28,16 +37,25 @@ export interface CmsSignatureResult {
   signingTime: Date;
   messageDigestHex: string;
   signatureHex: string;
+  hasTimestamp: boolean;
+  timestampTokenDer?: Buffer;
+  timestampGenTime?: Date;
+  tsaSubjectDn?: string;
+  tsaIssuerDn?: string;
+  tsaSerialNumber?: string;
+  tsaPolicyOid?: string;
 }
 
 /**
- * Trình khởi tạo chữ ký CMS Detached (PKCS#7) tuân thủ RFC 5652 / ISO 32000-1 cho chữ ký số PDF.
+ * Trình khởi tạo chữ ký CMS Detached (PKCS#7) tuân thủ RFC 5652 / ISO 32000-1 cho chữ ký số PDF,
+ * hỗ trợ nhúng RFC 3161 TimeStampToken trong UnsignedAttributes (PAdES Baseline B-T Readiness).
  * 
  * NGUYÊN TẮC BẢO MẬT & MẬT MÃ:
  * - Không bao giờ truy cập hoặc yêu cầu khóa riêng (Private Key).
  * - Hoàn toàn độc lập với vị trí lưu trữ khóa (Local Keystore hay Remote Cloud KMS / HSM).
  * - Ký trên DER encoding của SignedAttributes có chứa messageDigest khớp chính xác với ByteRange.
  * - Sắp xếp thuộc tính ký theo quy tắc DER Lexicographical Ordering.
+ * - Nếu có yêu cầu timestamp, đóng dấu thời gian trên SHA-256 của SignerInfo signatureValue theo RFC 3161.
  */
 export class CmsSignatureBuilder {
   public static async buildDetachedSignature(
@@ -50,6 +68,8 @@ export class CmsSignatureBuilder {
       signerCertificatePem,
       certificateChainPem = [],
       signingTime = new Date(),
+      tsaProvider,
+      requireTimestamp = false,
     } = options;
 
     if (!Buffer.isBuffer(messageDigest) || messageDigest.length !== 32) {
@@ -114,7 +134,6 @@ export class CmsSignatureBuilder {
     ]);
 
     // 2.4. SigningCertificateV2: 1.2.840.113549.1.9.16.2.47 (RFC 5035 / PAdES)
-    // Chứa SHA-256 hash của chứng thư số người ký để chống tấn công thay thế chứng thư (Certificate Substitution)
     const signerCertDer = Buffer.from(asn1.toDer(signerCertAsn1).getBytes(), 'binary');
     const signerCertHash = crypto.createHash('sha256').update(signerCertDer).digest();
 
@@ -159,11 +178,45 @@ export class CmsSignatureBuilder {
     const signingResult = await keyProvider.signDigest(keyAlias, signedAttrsDigest);
     const signatureBuffer = signingResult.signatureBytes;
 
-    // 6. Xây dựng cấu trúc SignerInfo
-    // Trong SignerInfo, signedAttrs được gắn thẻ [0] IMPLICIT (ContextSpecific tag 0)
-    const signedAttrsContextSpecific = asn1.create(asn1.Class.CONTEXT_SPECIFIC, 0, true, signedAttrsList);
+    // 6. Xử lý RFC 3161 Trusted Timestamping (nếu có yêu cầu)
+    let timestampResult: TimestampTokenResult | null = null;
+    let unsignedAttrsContextSpecific: any = null;
 
-    // IssuerAndSerialNumber
+    if (tsaProvider) {
+      // Per RFC 3161 và ETSI EN 319 142-1 (PAdES B-T): input là SHA-256 của octets chữ ký người ký (signatureValue)
+      const signatureDigest = crypto.createHash('sha256').update(signatureBuffer).digest();
+
+      try {
+        timestampResult = await tsaProvider.getTimestampToken(signatureDigest);
+      } catch (tsaErr: any) {
+        if (requireTimestamp) {
+          throw new Error(`Đóng dấu thời gian RFC 3161 thất bại trong chế độ ký bắt buộc timestamp: ${tsaErr.message}`);
+        }
+      }
+
+      if (timestampResult) {
+        // Nhúng TimeStampToken vào unsignedAttrs dưới OID id-aa-signatureTimeStampToken (1.2.840.113549.1.9.16.2.14)
+        const tstContentInfoAsn1 = asn1.fromDer(timestampResult.tokenDer.toString('binary'));
+        const attrSignatureTimeStamp = asn1.create(asn1.Class.UNIVERSAL, asn1.Type.SEQUENCE, true, [
+          asn1.create(
+            asn1.Class.UNIVERSAL,
+            asn1.Type.OID,
+            false,
+            asn1.oidToDer(OID_ID_AA_SIGNATURE_TIMESTAMP_TOKEN).getBytes()
+          ),
+          asn1.create(asn1.Class.UNIVERSAL, asn1.Type.SET, true, [tstContentInfoAsn1]),
+        ]);
+
+        unsignedAttrsContextSpecific = asn1.create(
+          asn1.Class.CONTEXT_SPECIFIC,
+          1, // [1] IMPLICIT
+          true,
+          [attrSignatureTimeStamp]
+        );
+      }
+    }
+
+    // 7. Xây dựng cấu trúc SignerInfo
     const tbsCert = (signerCertAsn1 as any).value[0];
     const serialNumberAsn1 = tbsCert.value[1];
     const issuerAsn1 = tbsCert.value[3];
@@ -172,7 +225,10 @@ export class CmsSignatureBuilder {
       serialNumberAsn1,
     ]);
 
-    const signerInfo = asn1.create(asn1.Class.UNIVERSAL, asn1.Type.SEQUENCE, true, [
+    // [0] IMPLICIT signedAttrs
+    const signedAttrsContextSpecific = asn1.create(asn1.Class.CONTEXT_SPECIFIC, 0, true, signedAttrsList);
+
+    const signerInfoElements: any[] = [
       asn1.create(asn1.Class.UNIVERSAL, asn1.Type.INTEGER, false, forge.util.hexToBytes('01')), // version 1
       issuerAndSerial,
       // digestAlgorithm: sha256 (2.16.840.1.101.3.4.2.1)
@@ -188,9 +244,16 @@ export class CmsSignatureBuilder {
       ]),
       // signatureValue: OCTET STRING chứa signature bytes
       asn1.create(asn1.Class.UNIVERSAL, asn1.Type.OCTETSTRING, false, signatureBuffer.toString('binary')),
-    ]);
+    ];
 
-    // 7. Tập hợp chuỗi chứng thư số (Certificates Set)
+    if (unsignedAttrsContextSpecific) {
+      // [1] IMPLICIT unsignedAttrs
+      signerInfoElements.push(unsignedAttrsContextSpecific);
+    }
+
+    const signerInfo = asn1.create(asn1.Class.UNIVERSAL, asn1.Type.SEQUENCE, true, signerInfoElements);
+
+    // 8. Tập hợp chuỗi chứng thư số (Certificates Set)
     const certsAsn1List = [signerCertAsn1];
     for (const chainPem of certificateChainPem) {
       try {
@@ -201,7 +264,7 @@ export class CmsSignatureBuilder {
       }
     }
 
-    // 8. SignedData Sequence
+    // 9. SignedData Sequence
     const signedDataSeq = asn1.create(asn1.Class.UNIVERSAL, asn1.Type.SEQUENCE, true, [
       asn1.create(asn1.Class.UNIVERSAL, asn1.Type.INTEGER, false, forge.util.hexToBytes('01')), // version 1
       // digestAlgorithms SET
@@ -221,7 +284,7 @@ export class CmsSignatureBuilder {
       asn1.create(asn1.Class.UNIVERSAL, asn1.Type.SET, true, [signerInfo]),
     ]);
 
-    // 9. ContentInfo: contentType 1.2.840.113549.1.7.2 (signedData), content [0] EXPLICIT
+    // 10. ContentInfo: contentType 1.2.840.113549.1.7.2 (signedData), content [0] EXPLICIT
     const contentInfo = asn1.create(asn1.Class.UNIVERSAL, asn1.Type.SEQUENCE, true, [
       asn1.create(asn1.Class.UNIVERSAL, asn1.Type.OID, false, asn1.oidToDer('1.2.840.113549.1.7.2').getBytes()),
       asn1.create(asn1.Class.CONTEXT_SPECIFIC, 0, true, [signedDataSeq]),
@@ -238,6 +301,13 @@ export class CmsSignatureBuilder {
       signingTime,
       messageDigestHex: messageDigest.toString('hex'),
       signatureHex: signatureBuffer.toString('hex'),
+      hasTimestamp: !!timestampResult,
+      timestampTokenDer: timestampResult?.tokenDer,
+      timestampGenTime: timestampResult?.genTime,
+      tsaSubjectDn: timestampResult?.tsaSubjectDn,
+      tsaIssuerDn: timestampResult?.tsaIssuerDn,
+      tsaSerialNumber: timestampResult?.serialNumber,
+      tsaPolicyOid: timestampResult?.policyOid,
     };
   }
 }

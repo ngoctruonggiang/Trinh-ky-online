@@ -210,6 +210,7 @@ export interface SignDocumentDto {
   contactInfo?: string;
   location?: string;
   versionNumber?: number;
+  requireTimestamp?: boolean;
 }
 
 export interface SignDocumentResultView {
@@ -227,6 +228,9 @@ export interface SignDocumentResultView {
   signingTime: string;
   isSignatureVerified: boolean;
   downloadUrl: string;
+  hasTimestamp: boolean;
+  timestampGenTime?: string;
+  tsaSubject?: string;
 }
 
 export interface PdfSignatureVerificationResult {
@@ -242,4 +246,12 @@ export interface PdfSignatureVerificationResult {
   messageDigestHex?: string;
   computedDigestHex?: string;
   errorMessage?: string;
+  hasTimestamp: boolean;
+  isTimestampValid?: boolean;
+  timestampGenTime?: string;
+  tsaSubject?: string;
+  tsaIssuer?: string;
+  tsaSerialNumber?: string;
+  tsaPolicyOid?: string;
+  timestampErrorMessage?: string;
 }

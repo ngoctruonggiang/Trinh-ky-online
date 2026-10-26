@@ -9,6 +9,7 @@ import {
   PDFString,
 } from 'pdf-lib';
 import { ISigningKeyProvider } from '../providers/signing-key-provider.interface.js';
+import { ITimestampAuthorityProvider } from '../timestamp/timestamp.interface.js';
 import { CmsSignatureBuilder } from './cms-signature.builder.js';
 
 export interface PdfSigningOptions {
@@ -34,6 +35,10 @@ export interface PdfSigningOptions {
   subFilter?: 'adbe.pkcs7.detached' | 'ETSI.CAdES.detached';
   /** Độ dài hex placeholder (mặc định 16384 hex ký tự = 8192 bytes CMS) */
   placeholderHexLength?: number;
+  /** Nhà cung cấp dấu thời gian tin cậy RFC 3161 TSA (tùy chọn) */
+  tsaProvider?: ITimestampAuthorityProvider;
+  /** Yêu cầu bắt buộc dấu thời gian tin cậy (mặc định false) */
+  requireTimestamp?: boolean;
 }
 
 export interface PdfSigningResult {
@@ -47,10 +52,17 @@ export interface PdfSigningResult {
   signerSubjectDn: string;
   signerIssuerDn: string;
   serialNumber: string;
+  hasTimestamp: boolean;
+  timestampGenTime?: Date;
+  tsaSubjectDn?: string;
+  tsaIssuerDn?: string;
+  tsaSerialNumber?: string;
+  tsaPolicyOid?: string;
 }
 
 /**
- * Adapter tích hợp cấu trúc chữ ký số PDF (ISO 32000-1) và CMS Detached Signature.
+ * Adapter tích hợp cấu trúc chữ ký số PDF (ISO 32000-1) và CMS Detached Signature,
+ * hỗ trợ nhúng dấu thời gian tin cậy RFC 3161 (PAdES B-T Readiness).
  */
 export class PdfSignatureAdapter {
   private static readonly DEFAULT_PLACEHOLDER_HEX_LENGTH = 16384; // 8192 bytes CMS
@@ -72,6 +84,8 @@ export class PdfSignatureAdapter {
       location,
       subFilter = 'adbe.pkcs7.detached',
       placeholderHexLength = PdfSignatureAdapter.DEFAULT_PLACEHOLDER_HEX_LENGTH,
+      tsaProvider,
+      requireTimestamp = false,
     } = options;
 
     if (!unsignedPdfBuffer || unsignedPdfBuffer.length === 0) {
@@ -209,7 +223,7 @@ export class PdfSignatureAdapter {
     const byteRangeContent = Buffer.concat([part1, part2]);
     const messageDigest = crypto.createHash('sha256').update(byteRangeContent).digest();
 
-    // 5. Khởi tạo CMS Detached Signature
+    // 5. Khởi tạo CMS Detached Signature (kèm RFC 3161 Timestamp nếu yêu cầu)
     const cmsResult = await CmsSignatureBuilder.buildDetachedSignature({
       messageDigest,
       signingTime,
@@ -218,6 +232,8 @@ export class PdfSignatureAdapter {
       keyAlias,
       keyProvider,
       subFilter,
+      tsaProvider,
+      requireTimestamp,
     });
 
     // 6. Kiểm tra kích thước và điền CMS hex vào vị trí Contents
@@ -246,6 +262,12 @@ export class PdfSignatureAdapter {
       signerSubjectDn: cmsResult.signerSubjectDn,
       signerIssuerDn: cmsResult.signerIssuerDn,
       serialNumber: cmsResult.serialNumber,
+      hasTimestamp: cmsResult.hasTimestamp,
+      timestampGenTime: cmsResult.timestampGenTime,
+      tsaSubjectDn: cmsResult.tsaSubjectDn,
+      tsaIssuerDn: cmsResult.tsaIssuerDn,
+      tsaSerialNumber: cmsResult.tsaSerialNumber,
+      tsaPolicyOid: cmsResult.tsaPolicyOid,
     };
   }
 }

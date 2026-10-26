@@ -644,6 +644,11 @@ model DocumentArtifact {
   signerSubject     String?        // Subject DN trích xuất từ chứng thư
   signingTime       DateTime?      // Thời điểm ký số
   byteRange         Int[]          // Mảng [offset1, len1, offset2, len2] của cấu trúc PDF
+  hasTimestamp      Boolean        @default(false)
+  timestampGenTime  DateTime?      // Thời điểm cấp dấu thời gian RFC 3161
+  tsaSubject        String?        // Subject DN của TSA
+  tsaSerialNumber   String?        // Số serial của token hoặc TSA cert
+  tsaPolicyOid      String?        // Policy OID của TSA
   requestedById     String
   errorMessage      String?
   startedAt         DateTime?

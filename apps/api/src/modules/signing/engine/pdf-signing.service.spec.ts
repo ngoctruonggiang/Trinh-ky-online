@@ -7,6 +7,7 @@ import {
 import { ArtifactStatus, ArtifactType, CertificateStatus, UserRole } from '@trinh-ky/shared';
 import { PdfSigningService } from './pdf-signing.service.js';
 import { UserPrincipal } from '../../../common/interfaces/user-principal.interface.js';
+import { TimestampService } from '../timestamp/timestamp.service.js';
 
 describe('PdfSigningService (Unit Tests)', () => {
   let service: PdfSigningService;
@@ -14,6 +15,7 @@ describe('PdfSigningService (Unit Tests)', () => {
   let mockStorageService: any;
   let mockArtifactService: any;
   let mockKeyProvider: any;
+  let mockTimestampService: any;
 
   const mockUser: UserPrincipal = {
     id: 'user-uuid-1',
@@ -116,11 +118,20 @@ describe('PdfSigningService (Unit Tests)', () => {
       getCertificate: vi.fn(),
     };
 
+    mockTimestampService = {
+      getProvider: vi.fn().mockReturnValue({
+        getTimestampToken: vi.fn(),
+        isAvailable: vi.fn().mockResolvedValue(true),
+      }),
+      isTsaAvailable: vi.fn().mockResolvedValue(true),
+    };
+
     service = new PdfSigningService(
       mockPrisma,
       mockStorageService,
       mockArtifactService,
-      mockKeyProvider
+      mockKeyProvider,
+      mockTimestampService as unknown as TimestampService
     );
   });
 

@@ -1,4 +1,4 @@
-import { IsOptional, IsString, IsUUID, IsInt, Min } from 'class-validator';
+import { IsBoolean, IsInt, IsOptional, IsString, IsUUID, Min } from 'class-validator';
 
 export class SignDocumentRequestDto {
   @IsOptional()
@@ -21,4 +21,8 @@ export class SignDocumentRequestDto {
   @IsInt({ message: 'versionNumber phải là số nguyên' })
   @Min(1, { message: 'versionNumber phải lớn hơn hoặc bằng 1' })
   versionNumber?: number;
+
+  @IsOptional()
+  @IsBoolean({ message: 'requireTimestamp phải là giá trị boolean' })
+  requireTimestamp?: boolean;
 }

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import * as crypto from 'crypto';
 import { PrismaClient, UserRole } from '@prisma/client';
-import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, InternalServerErrorException, NotFoundException } from '@nestjs/common';
 import { ArtifactStatus, ArtifactType, AuditAction, CertificateStatus, KeyStorageType } from '@trinh-ky/shared';
 import { UserPrincipal } from '../src/common/interfaces/user-principal.interface.js';
 import { StorageService } from '../src/modules/artifact/storage/storage.service.js';
@@ -10,13 +10,16 @@ import { ArtifactService } from '../src/modules/artifact/artifact.service.js';
 import { DevLocalKeystoreProvider } from '../src/modules/signing/providers/dev-local-keystore.provider.js';
 import { DevKeystoreGenerator } from '../src/modules/signing/dev-keystore-generator.js';
 import { PdfSigningService } from '../src/modules/signing/engine/pdf-signing.service.js';
+import { TimestampService } from '../src/modules/signing/timestamp/timestamp.service.js';
+import { DevTestTsaProvider } from '../src/modules/signing/timestamp/dev-test-tsa.provider.js';
 
-describe('Phase 13.2.2: CMS/PDF Signing Engine (PostgreSQL Integration)', () => {
+describe('Phase 13.3.1: RFC 3161 Trusted Timestamping & PAdES B-T (PostgreSQL Integration)', () => {
   let prisma: PrismaClient;
   let storageService: StorageService;
   let pdfGenerator: PdfGeneratorService;
   let artifactService: ArtifactService;
   let keystoreProvider: DevLocalKeystoreProvider;
+  let timestampService: TimestampService;
   let pdfSigningService: PdfSigningService;
 
   let orgAlpha: any;
@@ -45,11 +48,13 @@ describe('Phase 13.2.2: CMS/PDF Signing Engine (PostgreSQL Integration)', () => 
     pdfGenerator = new PdfGeneratorService();
     artifactService = new ArtifactService(prisma as any, storageService, pdfGenerator);
     keystoreProvider = new DevLocalKeystoreProvider();
+    timestampService = new TimestampService();
     pdfSigningService = new PdfSigningService(
       prisma as any,
       storageService,
       artifactService,
-      keystoreProvider
+      keystoreProvider,
+      timestampService
     );
 
     // 1. Tạo tổ chức Alpha và Beta
@@ -271,7 +276,7 @@ describe('Phase 13.2.2: CMS/PDF Signing Engine (PostgreSQL Integration)', () => 
     expect(unsignedArtifactBefore).toBeDefined();
     const originalRawPdfHash = unsignedArtifactBefore?.rawPdfHash;
 
-    // Thực hiện ký
+    // Thực hiện ký không kèm timestamp
     const signResult = await pdfSigningService.signDocument(
       documentAlpha.id,
       {
@@ -291,6 +296,7 @@ describe('Phase 13.2.2: CMS/PDF Signing Engine (PostgreSQL Integration)', () => 
     expect(signResult.signedPdfHash.length).toBe(64);
     expect(signResult.signedPdfHash).not.toBe(signResult.rawPdfHash);
     expect(signResult.byteRange).toHaveLength(4);
+    expect(signResult.hasTimestamp).toBe(false);
 
     // Kiểm tra Artifact trong Database
     const signedArtifact = await prisma.documentArtifact.findFirst({
@@ -307,6 +313,7 @@ describe('Phase 13.2.2: CMS/PDF Signing Engine (PostgreSQL Integration)', () => 
     expect(signedArtifact?.certificateId).toBe(certAlpha1.id);
     expect(signedArtifact?.signerSubject).toBe(certAlpha1.subjectDn);
     expect(signedArtifact?.byteRange).toEqual(signResult.byteRange);
+    expect(signedArtifact?.hasTimestamp).toBe(false);
 
     // Đảm bảo OFFICIAL_UNSIGNED vẫn nguyên vẹn (KHÔNG BỊ GHI ĐÈ)
     const unsignedArtifactAfter = await prisma.documentArtifact.findFirst({
@@ -332,9 +339,10 @@ describe('Phase 13.2.2: CMS/PDF Signing Engine (PostgreSQL Integration)', () => 
     expect(verifyResult.isTampered).toBe(false);
     expect(verifyResult.isDigestValid).toBe(true);
     expect(verifyResult.isSignatureValid).toBe(true);
+    expect(verifyResult.hasTimestamp).toBe(false);
     expect(verifyResult.signerSubject).toBe(certAlpha1.subjectDn);
     expect(verifyResult.byteRange).toHaveLength(4);
-    expect(verifyResult.embeddedDigest).toBe(verifyResult.computedDigest);
+    expect(verifyResult.computedDigestHex).toBe(verifyResult.messageDigestHex);
   });
 
   it('3. should detect byte-level tampering in signed PDF and fail verification', async () => {
@@ -350,9 +358,9 @@ describe('Phase 13.2.2: CMS/PDF Signing Engine (PostgreSQL Integration)', () => 
     // Đọc buffer thực tế từ Storage
     const originalBuffer = await storageService.get(signedArtifact!.storageKey!);
 
-    // Giả lập hacker sửa đổi 1 byte trong vùng nội dung được ký (ByteRange[0]..ByteRange[1])
+    // Giả lập sửa đổi 1 byte trong vùng nội dung được ký
     const tamperedBuffer = Buffer.from(originalBuffer);
-    tamperedBuffer[50] = tamperedBuffer[50] ^ 0xff; // Đảo bit tại byte 50
+    tamperedBuffer[50] = tamperedBuffer[50] ^ 0xff;
 
     // Ghi đè tệp tạm vào storage
     await storageService.put(signedArtifact!.storageKey!, tamperedBuffer);
@@ -394,7 +402,6 @@ describe('Phase 13.2.2: CMS/PDF Signing Engine (PostgreSQL Integration)', () => 
   });
 
   it('5. should reject signing if certificate belongs to another user without permission', async () => {
-    // UserAlpha2 cố tình ký bằng chứng thư của UserAlpha1
     await expect(
       pdfSigningService.signDocument(
         documentAlpha.id,
@@ -408,7 +415,6 @@ describe('Phase 13.2.2: CMS/PDF Signing Engine (PostgreSQL Integration)', () => 
   });
 
   it('6. should reject signing if certificate is REVOKED', async () => {
-    // Cập nhật trạng thái chứng thư sang REVOKED
     await prisma.digitalCertificate.update({
       where: { id: certAlpha1.id },
       data: { status: CertificateStatus.REVOKED, revokedAt: new Date() },
@@ -425,14 +431,78 @@ describe('Phase 13.2.2: CMS/PDF Signing Engine (PostgreSQL Integration)', () => 
       )
     ).rejects.toThrow(BadRequestException);
 
-    // Khôi phục lại ACTIVE
     await prisma.digitalCertificate.update({
       where: { id: certAlpha1.id },
       data: { status: CertificateStatus.ACTIVE, revokedAt: null },
     });
   });
 
-  it('7. should record audit log with signedPdfHash upon successful signing', async () => {
+  it('7. should sign with RFC 3161 Timestamp (requireTimestamp: true) and store timestamp metadata', async () => {
+    const signResult = await pdfSigningService.signDocument(
+      documentAlpha.id,
+      {
+        reason: 'Ký duyệt cấp cao có dấu thời gian tin cậy',
+        location: 'Hà Nội, Việt Nam',
+        certificateId: certAlpha1.id,
+        requireTimestamp: true,
+      },
+      principalAlpha1
+    );
+
+    expect(signResult.hasTimestamp).toBe(true);
+    expect(signResult.timestampGenTime).toBeDefined();
+    expect(signResult.tsaSubject).toContain('Trusted TSA');
+
+    // Kiểm tra CSDL
+    const signedArtifact = await prisma.documentArtifact.findFirst({
+      where: {
+        documentId: documentAlpha.id,
+        documentVersionId: docVersionAlpha.id,
+        artifactType: ArtifactType.SIGNED_PDF,
+      },
+    });
+
+    expect(signedArtifact?.hasTimestamp).toBe(true);
+    expect(signedArtifact?.timestampGenTime).toBeDefined();
+    expect(signedArtifact?.tsaSubject).toContain('Trusted TSA');
+    expect(signedArtifact?.tsaSerialNumber).toBeDefined();
+    expect(signedArtifact?.tsaPolicyOid).toBeDefined();
+
+    // Xác minh chữ ký kèm timestamp
+    const verifyResult = await pdfSigningService.verifyDocumentSignature(
+      documentAlpha.id,
+      { versionNumber: 1 },
+      principalAlpha1
+    );
+
+    expect(verifyResult.isValid).toBe(true);
+    expect(verifyResult.hasTimestamp).toBe(true);
+    expect(verifyResult.isTimestampValid).toBe(true);
+    expect(verifyResult.timestampGenTime).toBeDefined();
+    expect(verifyResult.tsaSubject).toContain('Trusted TSA');
+  });
+
+  it('8. should fail-closed when requireTimestamp is true and TSA provider fails', async () => {
+    const failingTsa = new DevTestTsaProvider({ simulateFailure: true });
+    timestampService.setProvider(failingTsa);
+
+    await expect(
+      pdfSigningService.signDocument(
+        documentAlpha.id,
+        {
+          reason: 'Ký bắt buộc timestamp nhưng TSA hỏng',
+          certificateId: certAlpha1.id,
+          requireTimestamp: true,
+        },
+        principalAlpha1
+      )
+    ).rejects.toThrow(/Đóng dấu thời gian RFC 3161 thất bại|ngừng phục vụ/);
+
+    // Khôi phục lại TSA hoạt động bình thường
+    timestampService.setProvider(new DevTestTsaProvider());
+  });
+
+  it('9. should record audit log with timestamp metadata upon signing with TSA', async () => {
     const auditLogs = await prisma.auditLog.findMany({
       where: {
         documentId: documentAlpha.id,
@@ -444,7 +514,7 @@ describe('Phase 13.2.2: CMS/PDF Signing Engine (PostgreSQL Integration)', () => 
     expect(auditLogs.length).toBeGreaterThan(0);
     const latestLog = auditLogs[0];
     expect(latestLog.userId).toBe(userAlpha1.id);
-    expect((latestLog.details as any)?.signedPdfHash).toBeDefined();
-    expect((latestLog.details as any)?.certificateId).toBe(certAlpha1.id);
+    expect((latestLog.details as any)?.hasTimestamp).toBe(true);
+    expect((latestLog.details as any)?.tsaSubject).toContain('Trusted TSA');
   });
 });

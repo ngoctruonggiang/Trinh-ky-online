@@ -1,15 +1,21 @@
 import * as crypto from 'crypto';
 import * as forge from 'node-forge';
 import { PdfSignatureVerificationResult } from '@trinh-ky/shared';
+import {
+  OID_ID_AA_SIGNATURE_TIMESTAMP_TOKEN,
+  TimestampTokenVerifier,
+} from '../timestamp/timestamp-token.verifier.js';
 
 /**
- * Bộ xác minh chữ ký số PDF và CMS Detached độc lập trong backend.
+ * Bộ xác minh chữ ký số PDF và CMS Detached độc lập trong backend,
+ * hỗ trợ xác minh toàn diện RFC 3161 TimeStampToken trong UnsignedAttributes (PAdES B-T Verification).
  * 
  * Kiểm tra đầy đủ:
  * 1. Cấu trúc bảng /ByteRange và ranh giới tệp PDF.
  * 2. Tính toàn vẹn nhị phân: Băm SHA-256 các vùng byte chỉ định và đối chiếu messageDigest.
  * 3. Tính toán mật mã: Tái tạo SignedAttributes SET và đối soát chữ ký RSA với khóa công khai X.509.
  * 4. Phát hiện can thiệp nhị phân (Tamper Detection).
+ * 5. Xác minh RFC 3161 TimeStampToken: messageImprint khớp SHA-256 của signatureValue, chữ ký TSA, EKU id-kp-timeStamping.
  */
 export class PdfSignatureVerifier {
   public static verify(signedPdfBuffer: Buffer): PdfSignatureVerificationResult {
@@ -19,6 +25,7 @@ export class PdfSignatureVerifier {
         isDigestValid: false,
         isSignatureValid: false,
         isTampered: true,
+        hasTimestamp: false,
         errorMessage: 'Tệp dữ liệu PDF rỗng.',
       };
     }
@@ -30,6 +37,7 @@ export class PdfSignatureVerifier {
         isDigestValid: false,
         isSignatureValid: false,
         isTampered: true,
+        hasTimestamp: false,
         errorMessage: 'Tệp không phải là định dạng PDF hợp lệ (thiếu %PDF- header).',
       };
     }
@@ -43,6 +51,7 @@ export class PdfSignatureVerifier {
         isDigestValid: false,
         isSignatureValid: false,
         isTampered: false,
+        hasTimestamp: false,
         errorMessage: 'Tệp PDF không chứa bảng /ByteRange của chữ ký số.',
       };
     }
@@ -56,6 +65,7 @@ export class PdfSignatureVerifier {
         isDigestValid: false,
         isSignatureValid: false,
         isTampered: true,
+        hasTimestamp: false,
         errorMessage: 'Cú pháp mảng /ByteRange bị hỏng hoặc không đúng định dạng.',
       };
     }
@@ -73,6 +83,7 @@ export class PdfSignatureVerifier {
         isDigestValid: false,
         isSignatureValid: false,
         isTampered: true,
+        hasTimestamp: false,
         errorMessage: `Bảng /ByteRange không đủ 4 phần tử (nhận được: ${byteRangeNumbers.length}).`,
       };
     }
@@ -92,6 +103,7 @@ export class PdfSignatureVerifier {
         isDigestValid: false,
         isSignatureValid: false,
         isTampered: true,
+        hasTimestamp: false,
         byteRange: byteRangeNumbers,
         errorMessage:
           'Bảng /ByteRange không bao phủ trọn vẹn tệp PDF từ byte 0 đến EOF hoặc offset bị sai lệch.',
@@ -99,7 +111,6 @@ export class PdfSignatureVerifier {
     }
 
     // 3. Trích xuất Contents hex string nằm giữa len1 và offset2
-    // byte tại len1 phải là '<' và byte tại offset2 - 1 phải là '>'
     const startAngle = signedPdfBuffer.indexOf('<', len1 - 20 > 0 ? len1 - 20 : 0);
     const endAngle = signedPdfBuffer.indexOf('>', offset2 - 10 > 0 ? offset2 - 10 : len1);
 
@@ -109,6 +120,7 @@ export class PdfSignatureVerifier {
         isDigestValid: false,
         isSignatureValid: false,
         isTampered: true,
+        hasTimestamp: false,
         byteRange: byteRangeNumbers,
         errorMessage: 'Không tìm thấy cặp thẻ <...> bao bọc chữ ký CMS trong /Contents.',
       };
@@ -121,6 +133,7 @@ export class PdfSignatureVerifier {
         isDigestValid: false,
         isSignatureValid: false,
         isTampered: true,
+        hasTimestamp: false,
         byteRange: byteRangeNumbers,
         errorMessage: 'Dữ liệu /Contents rỗng.',
       };
@@ -134,7 +147,6 @@ export class PdfSignatureVerifier {
     const computedDigestHex = computedDigest.toString('hex');
 
     // 5. Giải mã CMS DER từ Hex string
-    // Xác định độ dài thực tế của cấu trúc ASN.1 DER từ header để loại bỏ trailing zero padding
     const rawCmsBuffer = Buffer.from(hexContents, 'hex');
     if (rawCmsBuffer.length < 4 || rawCmsBuffer[0] !== 0x30) {
       return {
@@ -142,6 +154,7 @@ export class PdfSignatureVerifier {
         isDigestValid: false,
         isSignatureValid: false,
         isTampered: true,
+        hasTimestamp: false,
         byteRange: byteRangeNumbers,
         computedDigestHex,
         errorMessage: 'Dữ liệu trong /Contents không phải là cấu trúc ASN.1 Sequence hợp lệ.',
@@ -169,6 +182,7 @@ export class PdfSignatureVerifier {
         isDigestValid: false,
         isSignatureValid: false,
         isTampered: true,
+        hasTimestamp: false,
         byteRange: byteRangeNumbers,
         computedDigestHex,
         errorMessage: 'Cấu trúc ASN.1 DER của CMS bị cắt cụt (Truncated CMS buffer).',
@@ -205,6 +219,7 @@ export class PdfSignatureVerifier {
           isDigestValid: false,
           isSignatureValid: false,
           isTampered: true,
+          hasTimestamp: false,
           byteRange: byteRangeNumbers,
           computedDigestHex,
           errorMessage: 'Không tìm thấy SignerInfo trong cấu trúc SignedData của CMS.',
@@ -218,6 +233,7 @@ export class PdfSignatureVerifier {
           isDigestValid: false,
           isSignatureValid: false,
           isTampered: true,
+          hasTimestamp: false,
           byteRange: byteRangeNumbers,
           computedDigestHex,
           errorMessage: 'Không tìm thấy chứng thư số X.509 nhúng trong chữ ký CMS.',
@@ -250,9 +266,10 @@ export class PdfSignatureVerifier {
         .join(', ');
       const serialNumber = signerCert.serialNumber;
 
-      // Trích xuất signedAttrs và signatureValue từ signerInfo
+      // Trích xuất signedAttrs, signatureValue và unsignedAttrs từ signerInfo
       let signedAttrsItem: any = null;
       let signatureValueBytes: string | null = null;
+      let unsignedAttrsItem: any = null;
 
       for (const item of signerInfoSeq.value) {
         if (item.tagClass === asn1.Class.CONTEXT_SPECIFIC && item.type === 0) {
@@ -264,6 +281,9 @@ export class PdfSignatureVerifier {
           item.value.length >= 128
         ) {
           signatureValueBytes = item.value;
+        } else if (item.tagClass === asn1.Class.CONTEXT_SPECIFIC && item.type === 1) {
+          // [1] IMPLICIT unsignedAttrs
+          unsignedAttrsItem = item;
         }
       }
 
@@ -273,6 +293,7 @@ export class PdfSignatureVerifier {
           isDigestValid: false,
           isSignatureValid: false,
           isTampered: true,
+          hasTimestamp: false,
           byteRange: byteRangeNumbers,
           computedDigestHex,
           errorMessage: 'Thiếu SignedAttributes hoặc SignatureValue trong SignerInfo.',
@@ -302,6 +323,7 @@ export class PdfSignatureVerifier {
           isDigestValid: false,
           isSignatureValid: false,
           isTampered: true,
+          hasTimestamp: false,
           byteRange: byteRangeNumbers,
           computedDigestHex,
           errorMessage: 'Thuộc tính messageDigest không tồn tại trong SignedAttributes.',
@@ -318,6 +340,7 @@ export class PdfSignatureVerifier {
           isDigestValid: false,
           isSignatureValid: false,
           isTampered: true,
+          hasTimestamp: false,
           signerSubject: signerSubjectDn,
           signerIssuer: signerIssuerDn,
           serialNumber,
@@ -331,7 +354,6 @@ export class PdfSignatureVerifier {
       }
 
       // 8. KIỂM TRA CHỮ KÝ MẬT MÃ RSA TRÊN SIGNED ATTRIBUTES (Cryptographic Check)
-      // Tái tạo lại SignedAttributes dưới dạng SET (tag 0x31)
       const signedAttrsSet = asn1.create(
         asn1.Class.UNIVERSAL,
         asn1.Type.SET,
@@ -355,6 +377,7 @@ export class PdfSignatureVerifier {
           isDigestValid: true,
           isSignatureValid: false,
           isTampered: true,
+          hasTimestamp: false,
           signerSubject: signerSubjectDn,
           signerIssuer: signerIssuerDn,
           serialNumber,
@@ -367,11 +390,78 @@ export class PdfSignatureVerifier {
         };
       }
 
+      // 9. XÁC MINH DẤU THỜI GIAN TIN CẬY RFC 3161 (Nếu có trong unsignedAttrs)
+      let hasTimestamp = false;
+      let isTimestampValid = false;
+      let timestampGenTime: string | undefined;
+      let tsaSubject: string | undefined;
+      let tsaIssuer: string | undefined;
+      let tsaSerialNumber: string | undefined;
+      let tsaPolicyOid: string | undefined;
+      let timestampErrorMessage: string | undefined;
+
+      if (unsignedAttrsItem && unsignedAttrsItem.value && unsignedAttrsItem.value.length > 0) {
+        for (const attr of unsignedAttrsItem.value) {
+          const attrOid = asn1.derToOid(attr.value[0].value);
+          if (attrOid === OID_ID_AA_SIGNATURE_TIMESTAMP_TOKEN) {
+            hasTimestamp = true;
+            // attrValue là SET OF TimeStampToken (ContentInfo)
+            const tokenAsn1 = attr.value[1].value[0];
+            const tokenDer = Buffer.from(asn1.toDer(tokenAsn1).getBytes(), 'binary');
+
+            // Tính SHA-256 của signatureValue octets theo chuẩn RFC 3161
+            const expectedSignatureDigest = crypto.createHash('sha256').update(signatureBuffer).digest();
+
+            const tsVerify = TimestampTokenVerifier.verifyToken(tokenDer, expectedSignatureDigest);
+            if (tsVerify.isValid) {
+              isTimestampValid = true;
+              timestampGenTime = tsVerify.genTime?.toISOString();
+              tsaSubject = tsVerify.tsaSubjectDn;
+              tsaIssuer = tsVerify.tsaIssuerDn;
+              tsaSerialNumber = tsVerify.serialNumber;
+              tsaPolicyOid = tsVerify.policyOid;
+            } else {
+              isTimestampValid = false;
+              timestampErrorMessage = tsVerify.errorMessage;
+            }
+            break;
+          }
+        }
+      }
+
+      // Nếu có timestamp nhưng timestamp bị hỏng hoặc bị can thiệp thì toàn bộ chữ ký bị đánh dấu invalid & tampered
+      if (hasTimestamp && !isTimestampValid) {
+        return {
+          isValid: false,
+          isDigestValid: true,
+          isSignatureValid: true,
+          isTampered: true,
+          hasTimestamp: true,
+          isTimestampValid: false,
+          timestampErrorMessage: `Dấu thời gian RFC 3161 không hợp lệ hoặc đã bị can thiệp: ${timestampErrorMessage}`,
+          signerSubject: signerSubjectDn,
+          signerIssuer: signerIssuerDn,
+          serialNumber,
+          signingTime: signingTimeDate?.toISOString(),
+          byteRange: byteRangeNumbers,
+          messageDigestHex: embeddedDigestHex,
+          computedDigestHex,
+          errorMessage: `Dấu thời gian RFC 3161 không hợp lệ: ${timestampErrorMessage}`,
+        };
+      }
+
       return {
         isValid: true,
         isDigestValid: true,
         isSignatureValid: true,
         isTampered: false,
+        hasTimestamp,
+        isTimestampValid: hasTimestamp ? true : undefined,
+        timestampGenTime,
+        tsaSubject,
+        tsaIssuer,
+        tsaSerialNumber,
+        tsaPolicyOid,
         signerSubject: signerSubjectDn,
         signerIssuer: signerIssuerDn,
         serialNumber,
@@ -386,6 +476,7 @@ export class PdfSignatureVerifier {
         isDigestValid: false,
         isSignatureValid: false,
         isTampered: true,
+        hasTimestamp: false,
         byteRange: byteRangeNumbers,
         computedDigestHex,
         errorMessage: `Lỗi khi phân tích cú pháp CMS: ${parseErr.message}`,

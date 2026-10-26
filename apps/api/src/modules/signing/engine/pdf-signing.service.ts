@@ -24,6 +24,7 @@ import {
   ISigningKeyProvider,
   SIGNING_KEY_PROVIDER,
 } from '../providers/signing-key-provider.interface.js';
+import { TimestampService } from '../timestamp/timestamp.service.js';
 import { PdfSignatureAdapter } from './pdf-signature.adapter.js';
 import { PdfSignatureVerifier } from './pdf-signature.verifier.js';
 
@@ -34,11 +35,12 @@ export class PdfSigningService {
     private readonly storageService: StorageService,
     private readonly artifactService: ArtifactService,
     @Inject(SIGNING_KEY_PROVIDER)
-    private readonly keyProvider: ISigningKeyProvider
+    private readonly keyProvider: ISigningKeyProvider,
+    private readonly timestampService: TimestampService
   ) {}
 
   /**
-   * Ký số tệp PDF của hồ sơ bằng chứng thư số X.509
+   * Ký số tệp PDF của hồ sơ bằng chứng thư số X.509, hỗ trợ RFC 3161 Trusted Timestamping
    */
   async signDocument(
     documentId: string,
@@ -147,6 +149,8 @@ export class PdfSigningService {
       );
     }
 
+    const requireTimestamp = !!dto.requireTimestamp;
+
     // 3. Khóa tương tranh transaction bằng PostgreSQL Advisory Lock
     return await this.prisma.$transaction(async (tx) => {
       await tx.$executeRawUnsafe(
@@ -192,7 +196,7 @@ export class PdfSigningService {
         );
       }
 
-      // 5. Thực hiện ký số PDF (CMS Detached + ByteRange Injection)
+      // 5. Thực hiện ký số PDF (CMS Detached + ByteRange Injection + RFC 3161 TSA)
       const signingResult = await PdfSignatureAdapter.signPdf({
         unsignedPdfBuffer: unsignedPdfBytes,
         keyAlias: certificate.keyAlias,
@@ -202,6 +206,8 @@ export class PdfSigningService {
         contactInfo: dto.contactInfo || user.email,
         signerName: user.fullName || undefined,
         location: dto.location || 'Việt Nam',
+        tsaProvider: requireTimestamp ? this.timestampService.getProvider() : undefined,
+        requireTimestamp,
       });
 
       // 6. TỰ XÁC MINH NGAY LẬP TỨC ĐỐI VỚI PDF ĐÃ KÝ (Fail Closed Defense in Depth)
@@ -209,6 +215,12 @@ export class PdfSigningService {
       if (!verifyResult.isValid || verifyResult.isTampered) {
         throw new InternalServerErrorException(
           `Chữ ký số tạo ra không vượt qua bước tự xác minh tính toàn vẹn: ${verifyResult.errorMessage}`
+        );
+      }
+
+      if (requireTimestamp && (!verifyResult.hasTimestamp || !verifyResult.isTimestampValid)) {
+        throw new InternalServerErrorException(
+          `Yêu cầu ký bắt buộc dấu thời gian RFC 3161 nhưng xác minh dấu thời gian không thành công: ${verifyResult.timestampErrorMessage || 'Thiếu timestamp token'}`
         );
       }
 
@@ -247,6 +259,11 @@ export class PdfSigningService {
           signerSubject: certificate.subjectDn,
           signingTime: signingResult.signingTime,
           byteRange: signingResult.byteRange,
+          hasTimestamp: signingResult.hasTimestamp,
+          timestampGenTime: signingResult.timestampGenTime,
+          tsaSubject: signingResult.tsaSubjectDn,
+          tsaSerialNumber: signingResult.tsaSerialNumber,
+          tsaPolicyOid: signingResult.tsaPolicyOid,
           requestedById: user.id,
           completedAt: new Date(),
         },
@@ -261,6 +278,11 @@ export class PdfSigningService {
           signerSubject: certificate.subjectDn,
           signingTime: signingResult.signingTime,
           byteRange: signingResult.byteRange,
+          hasTimestamp: signingResult.hasTimestamp,
+          timestampGenTime: signingResult.timestampGenTime,
+          tsaSubject: signingResult.tsaSubjectDn,
+          tsaSerialNumber: signingResult.tsaSerialNumber,
+          tsaPolicyOid: signingResult.tsaPolicyOid,
           completedAt: new Date(),
           errorMessage: null,
         },
@@ -281,6 +303,9 @@ export class PdfSigningService {
             signedPdfHash: signingResult.signedPdfHash,
             signerSubject: certificate.subjectDn,
             signingTime: signingResult.signingTime.toISOString(),
+            hasTimestamp: signingResult.hasTimestamp,
+            tsaSubject: signingResult.tsaSubjectDn,
+            timestampGenTime: signingResult.timestampGenTime?.toISOString(),
           },
         },
       });
@@ -298,6 +323,9 @@ export class PdfSigningService {
         signerSubject: certificate.subjectDn,
         signerIssuer: certificate.issuerDn,
         signingTime: signingResult.signingTime.toISOString(),
+        hasTimestamp: signingResult.hasTimestamp,
+        timestampGenTime: signingResult.timestampGenTime?.toISOString(),
+        tsaSubject: signingResult.tsaSubjectDn,
         isSignatureVerified: true,
         downloadUrl: `/api/documents/${document.id}/pdf?type=SIGNED_PDF`,
       };

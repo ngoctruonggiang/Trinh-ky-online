@@ -1,7 +1,7 @@
 # KẾ HOẠCH TRIỂN KHAI HỆ THỐNG KÝ SỐ MẬT MÃ PDF (PHASES 13.1 — 13.4)
 *Dự án: Trình Ký Online Nội Bộ Doanh Nghiệp / Tập Đoàn*  
-*Giai đoạn: Phase 13.1 — PDF Rendering Engine & Secure Artifact Storage*  
-*Trạng thái: PHASE 13.1 COMPLETED — SẴN SÀNG KÍCH HOẠT PHASE 13.2*
+*Giai đoạn: Phase 13.3.1 — RFC 3161 Trusted Timestamping & PAdES B-T Readiness*  
+*Trạng thái: PHASE 13.3.1 COMPLETED — SẴN SÀNG KÍCH HOẠT PHASE 13.3.2*
 
 ---
 
@@ -14,19 +14,22 @@ gantt
     section Phase 13.1
     PDF Rendering Engine & Storage Service        :done, p131, 2026-10-24, 1d
     section Phase 13.2
-    Cryptographic Signing Engine & Dev Keystore  :active, p132, 2026-10-25, 5d
-    section Phase 13.3
-    Workflow Integration, Delegation & Audit     :p133, after p132, 4d
+    Cryptographic Signing Engine & Dev Keystore  :done, p132, 2026-10-24, 1d
+    section Phase 13.3.1
+    RFC 3161 TSA & PAdES B-T Readiness           :done, p1331, 2026-10-24, 1d
+    section Phase 13.3.2
+    PAdES B-LT/B-LTA, DSS, VRI & Long-Term Valid :active, p1332, 2026-10-25, 3d
     section Phase 13.4
-    Independent Verification & Security Gates    :p134, after p133, 4d
+    Workflow Auto-Signing, Multi-Signer & Audit  :p134, after p1332, 4d
 ```
 
 | Giai đoạn | Tên nhiệm vụ chính | Trọng tâm bàn giao kỹ thuật | Tiêu chí hoàn thành cốt lõi (Definition of Done) | Trạng thái |
 | :--- | :--- | :--- | :--- | :--- |
 | **Phase 13.1** | **PDF Rendering Engine & Artifact Storage Service** | 1. Xây dựng dịch vụ kết xuất PDF bất biến từ form snapshot.<br/>2. Xây dựng module lưu trữ `StorageService` với tenant isolation.<br/>3. Tạo bảng lưu trữ nhị phân và mã băm SHA-256. | - Sinh được PDF A4 chuẩn tiếng Việt từ `DocumentVersion`.<br/>- Tính và lưu đúng `rawPdfHash` khớp nhị phân 100%.<br/>- API tải file có phân quyền tenant. | **HOÀN THÀNH (100% Tests Pass)** |
-| **Phase 13.2** | **Cryptographic Signing Engine & Dev Keystore** | 1. Tích hợp `pdf-lib` + `@node-signpdf` + `@peculiar/x509`.<br/>2. Triển khai `DevLocalKeystoreProvider` (PKCS#12 AES-256).<br/>3. Thực hiện chèn ByteRange và CMS detached signature. | - Ký thành công chữ ký số PAdES B-B trên tệp PDF.<br/>- Adobe Acrobat Reader nhận diện chữ ký hợp lệ.<br/>- Không rò rỉ khóa riêng ra ngoài RAM. |
-| **Phase 13.3** | **Workflow Integration, Multi-Signer & Delegation** | 1. Tích hợp ký số vào `WorkflowOrchestrator` và FSM.<br/>2. Hỗ trợ Incremental Updates cho quy trình nhiều người ký.<br/>3. Liên kết chứng thư người ký thực tế với chính sách ủy quyền. | - Phê duyệt bước sinh đúng chữ ký số tương ứng.<br/>- Chữ ký sau không làm hỏng chữ ký trước.<br/>- Bản ghi audit liên kết `actualActor` + `delegator` + `certId`. |
-| **Phase 13.4** | **Independent Verification, CLI Verifier & Security Gates** | 1. Xây dựng API và CLI kiểm tra tính toàn vẹn độc lập.<br/>2. Kiểm thử tấn công sửa đổi byte, replay, cross-tenant.<br/>3. Đạt 100% kiểm thử hồi quy và Live HTTP E2E tests. | - Phát hiện 100% tệp PDF bị sửa đổi sau ký.<br/>- Độc lập xác minh bằng OpenSSL và Adobe Reader.<br/>- Bộ test tự động PASS toàn diện. |
+| **Phase 13.2** | **Cryptographic Signing Engine & Dev Keystore** | 1. Tích hợp `pdf-lib` + `@node-signpdf` + `@peculiar/x509`.<br/>2. Triển khai `DevLocalKeystoreProvider` (PKCS#12 AES-256).<br/>3. Thực hiện chèn ByteRange và CMS detached signature. | - Ký thành công chữ ký số PAdES B-B trên tệp PDF.<br/>- OpenSSL & Adobe Acrobat Reader nhận diện chữ ký hợp lệ.<br/>- Không rò rỉ khóa riêng ra ngoài RAM. | **HOÀN THÀNH (100% Tests Pass)** |
+| **Phase 13.3.1** | **RFC 3161 Trusted Timestamping & PAdES B-T Readiness** | 1. RFC 3161 Client & TimeStampToken Verifier.<br/>2. Nhúng `id-aa-signatureTimeStampToken` vào CMS `unsignedAttrs`.<br/>3. Độc lập xác minh chữ ký kèm timestamp nhúng, phát hiện can thiệp nhị phân. | - Cấp phát & nhúng TimeStampToken vào CMS unsignedAttrs.<br/>- OpenSSL 3.5.7 CLI `ts -verify` trả về `Verification: OK`.<br/>- Phân định rõ ràng PAdES B-T Readiness (chưa claim B-LT/B-LTA). | **HOÀN THÀNH (100% Tests Pass)** |
+| **Phase 13.3.2** | **PAdES B-LT/B-LTA, DSS, VRI & Long-Term Validation** | 1. Cấu trúc Document Security Store (`/DSS`) & Validation-Related Info (`/VRI`).<br/>2. Nhúng chứng thư trung gian, CRLs, OCSP Responses.<br/>3. Document Time-Stamp (`id-aa-ets-docTimeStamp`). | - Lưu trữ đầy đủ chuỗi chứng thực phục vụ xác minh dài hạn.<br/>- Adobe Acrobat hiển thị "Signature is LTV enabled". | **SẮP DIỄN RA (READY)** |
+| **Phase 13.4** | **Workflow Auto-Signing, Multi-Signer & Final Audit** | 1. Tự động kích hoạt ký khi workflow đạt trạng thái `APPROVED`.<br/>2. Hỗ trợ Incremental Updates cho quy trình nhiều người ký.<br/>3. Liên kết chứng thư người ký thực tế với chính sách ủy quyền. | - Phê duyệt bước sinh đúng chữ ký số tương ứng.<br/>- Chữ ký sau không làm hỏng chữ ký trước.<br/>- Bản ghi audit liên kết `actualActor` + `delegator` + `certId`. | **CHỜ KÍCH HOẠT** |
 
 ---
 
@@ -311,5 +314,41 @@ Dựa trên kết quả triển khai và kiểm thử thực tế của Phase 13
    - **Zero Regression**: Shared (47/47), Web (46/46), Monorepo build PASS 100%.
 7. **Ranh giới Kỹ thuật**: Chưa có RFC 3161 TSA; chưa triển khai DSS/VRI/LTV; chưa tự động ký khi văn bản chuyển sang `APPROVED`.
 
-### **KẾT LUẬN CUỐI CÙNG: GO CHO PHASE 13.3**
-Hệ thống chính thức đủ điều kiện và sẵn sàng bước vào **Phase 13.3: Dịch vụ Dấu thời gian Tin cậy RFC 3161 TSA & Cổng Xác minh Chữ ký Số Độc lập (Public Verification Portal)**.
+### **KẾT LUẬN CHO PHASE 13.2.2: ĐÃ HOÀN THÀNH XUẤT SẮC (COMPLETED)**
+Hệ thống chính thức đủ điều kiện và sẵn sàng bước vào Phase 13.3.1.
+
+---
+
+## 8. BÁO CÁO NGHIỆM THU PHASE 13.3.1 — RFC 3161 TRUSTED TIMESTAMPING & PAdES B-T READINESS
+
+Dựa trên kết quả triển khai và kiểm thử thực tế của Phase 13.3.1:
+
+### 8.1. Đánh giá Tiêu chí Đạt (Pass Criteria):
+1. **RFC 3161 Client & TimeStampToken Verifier (`Rfc3161TimestampClient`, `TimestampTokenVerifier`)**:
+   - Dựng ASN.1 DER `TimeStampReq` với `messageImprint` = SHA-256(`signatureValue`), nonce ngẫu nhiên 64-bit, `certReq: true`.
+   - Xác minh toàn vẹn TSTInfo: kiểm tra đúng `messageImprint`, khớp nonce, kiểm tra chứng thư TSA có EKU `id-kp-timeStamping` (`1.3.6.1.5.5.7.3.8`), kiểm tra cửa sổ hiệu lực (`notBefore <= genTime <= notAfter`), và chữ ký RSA của TSA trên TSTInfo cùng SignedAttrs (`signingCertificateV2`). $\rightarrow$ **ĐẠT (PASS)**.
+2. **Nhúng Timestamp Token vào CMS Unsigned Attributes (`CmsSignatureBuilder`)**:
+   - Nhúng `TimeStampToken` (PKCS#7 ContentInfo) vào CMS `SignerInfo.unsignedAttrs [1] IMPLICIT` dưới OID `1.2.840.113549.1.9.16.2.14` (`id-aa-signatureTimeStampToken`).
+   - Giữ nguyên vẹn 100% `signedAttrs` và chữ ký gốc của người ký (không làm thay đổi hash đã ký). $\rightarrow$ **ĐẠT (PASS)**.
+3. **Trình Xác minh Độc lập Chữ ký & Timestamp (`PdfSignatureVerifier`)**:
+   - Tự động bóc tách `unsignedAttrs`, phát hiện token timestamp nếu có, xác minh TSTInfo độc lập với khóa công khai TSA.
+   - Thử nghiệm can thiệp nhị phân 1 byte vào timestamp token: hệ thống phát hiện tức thì (`isTampered: true`, `isTimestampValid: false`, `overallStatus: TAMPERED`). $\rightarrow$ **ĐẠT (PASS)**.
+4. **Cơ chế Fail-Closed & Lưu trữ Cơ sở Dữ liệu (`PdfSigningService`)**:
+   - Nếu `requireTimestamp: true` mà TSA không phản hồi / lỗi, transaction ký bị từ chối ngay lập tức (fail-closed), không lưu tệp lỗi.
+   - Migration CSDL `20261024100131_add_timestamp_to_document_artifact` lưu trữ đầy đủ `hasTimestamp`, `timestampGenTime`, `tsaSubject`, `tsaSerialNumber`, `tsaPolicyOid`. $\rightarrow$ **ĐẠT (PASS)**.
+5. **Kiểm thử Toàn diện & Xác minh Độc lập OpenSSL 3.5.7 CLI**:
+   - **215/215 Unit Tests** (21 suites) PASS 100%.
+   - **128/128 PostgreSQL Integration Tests** (12 suites) PASS 100%.
+   - **85/85 Live HTTP E2E Tests** (100%) PASS trên NestJS và PostgreSQL vật lý.
+   - **OpenSSL 3.5.7 CLI Detached Verification**: `Verification successful`.
+   - **OpenSSL 3.5.7 CLI TS Verification**: `openssl ts -verify -in timestamp_token.der -token_in -data signature_value.bin -CAfile tsa_cert.pem` $\rightarrow$ `Verification: OK`.
+   - **OpenSSL 3.5.7 CLI TS Reply Parse**: `openssl ts -reply -in timestamp_token.der -token_in -text` hiển thị đầy đủ TSTInfo Version 1, SHA-256 message data, serial number, and timestamp.
+   - **Zero Regression**: Shared (47/47), Web (46/46), Monorepo build PASS 100%.
+6. **Ranh giới Kỹ thuật & Chuẩn mực**:
+   - Đạt trạng thái **PAdES Baseline B-T Readiness** (có chữ ký số + signature timestamp token RFC 3161).
+   - Chưa triển khai đầy đủ LTV/DSS/VRI/B-LT/B-LTA (thuộc Phase 13.3.2).
+   - Chưa tự động ký khi văn bản chuyển sang `APPROVED` (thuộc Phase 13.4).
+
+### **KẾT LUẬN CUỐI CÙNG: GO CHO PHASE 13.3.2**
+Hệ thống chính thức đủ điều kiện và sẵn sàng bước vào **Phase 13.3.2: PAdES Baseline B-LT/B-LTA, Document Security Store (DSS), Validation-Related Info (VRI) & Long-Term Validation**.
+

@@ -1518,9 +1518,9 @@ Phần này quy định các giao ước API phục vụ việc kết xuất PDF
 
 ---
 
-### 10.10. Ký số PDF mật mã bằng CMS Detached (Phase 13.2.2 — Sign Document PDF)
+### 10.10. Ký số PDF mật mã bằng CMS Detached (Phase 13.2.2 & 13.3.1 — Sign Document PDF)
 - **Endpoint:** `POST /api/documents/:id/sign`
-- **Mục đích:** Thực hiện quy trình ký số PDF mật mã chuẩn ISO 32000-1 / RFC 5652:
+- **Mục đích:** Thực hiện quy trình ký số PDF mật mã chuẩn ISO 32000-1 / RFC 5652 / RFC 3161:
   1. Kiểm tra tài liệu và phân quyền Tenant (chặn 403 Forbidden nếu khác Tenant).
   2. Nạp bản ghi PDF chưa ký `OFFICIAL_UNSIGNED` từ hệ thống lưu trữ an toàn ngoài web root.
   3. Lấy chứng thư số hợp lệ của người ký (`ACTIVE`, còn hạn, người dùng có quyền sử dụng).
@@ -1528,9 +1528,10 @@ Phần này quy định các giao ước API phục vụ việc kết xuất PDF
   5. Thiết lập `/ByteRange [offset1, len1, offset2, len2]` và vùng đệm nhị phân CMS DER (`/Contents <hex>`).
   6. Trích xuất chính xác 2 đoạn byte trong `/ByteRange` và băm SHA-256 (32 bytes).
   7. Dựng CMS Detached DER với `SignerInfo`, `contentType`, `signingTime`, `messageDigest` = SHA-256 của ByteRange, gọi `ISigningKeyProvider.signDigest`.
-  8. Nhúng CMS hex vào vị trí `/Contents`, xác minh lại độc lập tính toàn vẹn và chữ ký RSA trước khi lưu trữ (Fail-closed verification).
-  9. Lưu trữ tệp PDF đã ký vào Storage Service và tạo bản ghi `DocumentArtifact` kiểu `SIGNED_PDF` với `signedPdfHash`.
-  10. **Bảo toàn tệp gốc:** Bản ghi và tệp nhị phân `OFFICIAL_UNSIGNED` không bao giờ bị ghi đè.
+  8. Nếu `requireTimestamp: true`: Gửi SHA-256 của chữ ký người ký (`SignerInfo.signatureValue`) tới máy chủ RFC 3161 TSA, xác minh chữ ký TSA và EKU `id-kp-timeStamping`, nhúng `TimeStampToken` vào `SignerInfo.unsignedAttrs` dưới OID `1.2.840.113549.1.9.16.2.14` (`id-aa-signatureTimeStampToken`).
+  9. Nhúng CMS hex vào vị trí `/Contents`, xác minh lại độc lập tính toàn vẹn, chữ ký RSA và TimeStampToken trước khi lưu trữ (Fail-closed verification).
+  10. Lưu trữ tệp PDF đã ký vào Storage Service và tạo bản ghi `DocumentArtifact` kiểu `SIGNED_PDF` với `signedPdfHash`, `hasTimestamp`, `timestampGenTime`, `tsaSubject`.
+  11. **Bảo toàn tệp gốc:** Bản ghi và tệp nhị phân `OFFICIAL_UNSIGNED` không bao giờ bị ghi đè.
 - **Quyền hạn:** `USER` (thuộc cùng tổ chức sở hữu tài liệu), `ADMIN`, `SUPER_ADMIN`.
 - **Request Body:**
   ```json
@@ -1539,7 +1540,8 @@ Phần này quy định các giao ước API phục vụ việc kết xuất PDF
     "versionNumber": 1,
     "reason": "Phê duyệt quyết toán hợp đồng công nghệ 2026",
     "location": "Hà Nội, Việt Nam",
-    "contactInfo": "nguyenvana@vinagroup.vn"
+    "contactInfo": "nguyenvana@vinagroup.vn",
+    "requireTimestamp": true
   }
   ```
 - **Response Thành công (HTTP 200 OK):**
@@ -1559,21 +1561,24 @@ Phần này quy định các giao ước API phục vụ việc kết xuất PDF
       "signerSubject": "CN=Nguyễn Văn A, O=Tập đoàn VinaGroup, C=VN",
       "signerIssuer": "CN=VinaGroup Internal Root CA, O=VinaGroup",
       "signingTime": "2026-10-24T09:34:12.000Z",
+      "hasTimestamp": true,
+      "timestampGenTime": "2026-10-24T09:34:12.500Z",
+      "tsaSubject": "CN=Trinh Ky Online Trusted TSA 2026, O=Trinh Ky Online PKI Root Lab, C=VN",
       "isSignatureVerified": true,
       "downloadUrl": "/api/documents/uuid-document-id/pdf?type=SIGNED_PDF"
     },
-    "timestamp": "2026-10-24T09:34:12.100Z"
+    "timestamp": "2026-10-24T09:34:12.600Z"
   }
   ```
 
 ---
 
-### 10.11. Xác minh độc lập chữ ký số PDF (Phase 13.2.2 — Verify PDF Signature)
+### 10.11. Xác minh độc lập chữ ký số PDF & Timestamp Token (Phase 13.2.2 & 13.3.1 — Verify PDF Signature)
 - **Endpoint:** `GET /api/documents/:id/verify-signature`
 - **Query Parameters:** `version` (tùy chọn, mặc định là phiên bản hiện tại).
-- **Mục đích:** Đọc tệp PDF đã ký từ kho lưu trữ, phân tích cấu trúc `/ByteRange`, trích xuất CMS Signature DER, kiểm tra toàn vẹn mã băm `messageDigest` so với nội dung byte vật lý và xác minh chữ ký RSA của `SignerInfo` với khóa công khai X.509 nhúng trong chứng thư.
+- **Mục đích:** Đọc tệp PDF đã ký từ kho lưu trữ, phân tích cấu trúc `/ByteRange`, trích xuất CMS Signature DER, kiểm tra toàn vẹn mã băm `messageDigest` so với nội dung byte vật lý, xác minh chữ ký RSA của `SignerInfo`, và thẩm định độc lập TimeStampToken RFC 3161 trong `unsignedAttrs` (PAdES B-T verification).
 - **Quyền hạn:** `USER` (cùng tổ chức), `ADMIN`, `SUPER_ADMIN`. Chặn 403 Forbidden nếu khác Tenant.
-- **Response Thành công (HTTP 200 OK):**
+- **Response Thành công (HTTP 200 OK — Kèm Dấu thời gian tin cậy):**
   ```json
   {
     "success": true,
@@ -1582,6 +1587,13 @@ Phần này quy định các giao ước API phục vụ việc kết xuất PDF
       "isDigestValid": true,
       "isSignatureValid": true,
       "isTampered": false,
+      "hasTimestamp": true,
+      "isTimestampValid": true,
+      "timestampGenTime": "2026-10-24T09:34:12.500Z",
+      "tsaSubject": "CN=Trinh Ky Online Trusted TSA 2026, O=Trinh Ky Online PKI Root Lab, C=VN",
+      "tsaIssuer": "CN=Trinh Ky Online PKI Root CA, C=VN",
+      "tsaSerialNumber": "020CE31D0764846157",
+      "tsaPolicyOid": "1.3.6.1.4.1.61498.1.1",
       "signerSubject": "CN=Nguyễn Văn A, O=Tập đoàn VinaGroup, C=VN",
       "signerIssuer": "CN=VinaGroup Internal Root CA, O=VinaGroup",
       "serialNumber": "5f3a89bc1200e4",
@@ -1602,7 +1614,8 @@ Phần này quy định các giao ước API phục vụ việc kết xuất PDF
       "isDigestValid": false,
       "isSignatureValid": false,
       "isTampered": true,
-      "errorMessage": "Mã băm SHA-256 của vùng dữ liệu ký không khớp với messageDigest trong CMS."
+      "hasTimestamp": false,
+      "errorMessage": "Mã băm dữ liệu ByteRange không khớp với giá trị messageDigest trong chữ ký số. Tệp PDF đã bị can thiệp trái phép sau khi ký (Document Tampered)."
     }
   }
   ```
@@ -1620,4 +1633,12 @@ Phần này quy định các giao ước API phục vụ việc kết xuất PDF
   - `X-Signed-Pdf-Hash`: SHA-256 của toàn bộ tệp PDF đã ký
   - `X-Artifact-Id`: UUID của artifact
 - **Response (HTTP 200 OK):** Luồng nhị phân Buffer của tệp PDF đã ký số hoàn chỉnh.
+
+---
+
+### 10.13. Ranh giới Pháp lý và Chuẩn PAdES B-T Readiness
+- Dấu thời gian RFC 3161 (`id-aa-signatureTimeStampToken`) chứng minh sự tồn tại của chữ ký người ký trước thời điểm `genTime`.
+- Hệ thống hỗ trợ kiểm tra fail-closed: nếu `requireTimestamp: true` mà TSA không sẵn sàng hoặc token bị lỗi, giao dịch ký lập tức bị hủy bỏ, không fallback sang đồng hồ hệ thống nội bộ.
+- Hệ thống KHÔNG tự động tuyên bố đạt giá trị pháp lý tương đương chữ ký số công cộng quốc gia nếu chứng thư số chưa thuộc danh mục CA tin cậy quốc gia (Bộ TT&TT).
+
 

@@ -483,6 +483,43 @@ apps/api/src/modules/signing/
    - Ký số qua Adapter và Verifier; bắt buộc quy trình **Fail-closed**: chỉ khi self-verification đạt 100% mới ghi file vật lý vào Storage và cập nhật bản ghi `DocumentArtifact` kiểu `SIGNED_PDF`.
    - Ghi nhật ký kiểm toán `DOCUMENT_SIGN_PDF` kèm `signedPdfHash`, `certificateId`, `userId`, `organizationId`.
 
+### 9.6. Kiến trúc RFC 3161 Trusted Timestamping & PAdES B-T Readiness (Hoàn thành trong Phase 13.3.1)
+
+Trong Phase 13.3.1, hệ thống đã triển khai đầy đủ kiến trúc Trusted Timestamp Authority (TSA) theo RFC 3161, nhúng dấu thời gian tin cậy vào chữ ký số PDF hướng đến PAdES Baseline B-T:
+
+```
+apps/api/src/modules/signing/timestamp/
+├── timestamp.interface.ts                    # Hợp đồng trừu tượng ITimestampAuthorityProvider
+├── timestamp-token.verifier.ts               # Thẩm định độc lập RFC 3161 TimeStampToken & EKU
+├── rfc3161-timestamp.client.ts               # Client RFC 3161: TimeStampReq / TimeStampResp ASN.1 DER
+├── dev-test-tsa.provider.ts                  # Provider TSA nội bộ độc lập không phụ thuộc Internet
+├── http-tsa.provider.ts                      # Provider kết nối TSA vendor thực tế qua HTTP/HTTPS có retry
+└── timestamp.service.ts                      # NestJS Injectable service điều phối TSA và fail-closed policy
+```
+
+1. **Chuẩn hóa dữ liệu đầu vào theo RFC 3161 & PAdES B-T**:
+   - Dữ liệu cần đóng dấu thời gian **bắt buộc là `signatureValue` octets** của người ký (chữ ký RSA 256 bytes từ `keyProvider.signDigest`), **tuyệt đối không nhầm lẫn** với PDF ByteRange digest.
+   - `messageImprint`: SHA-256 của `signatureValue`.
+   - Sinh `nonce` ngẫu nhiên 64-bit để chống tấn công phát lại (Replay Attacks).
+   - Yêu cầu chứng thư TSA (`certReq: true`).
+
+2. **Cấu trúc nhúng TimeStampToken vào CMS (ETSI EN 319 142-1 / PAdES B-T)**:
+   - `TimeStampToken` (ContentInfo ASN.1 DER) được nhúng làm một `Attribute` không ký trong `SignerInfo.unsignedAttrs` (tag `[1] IMPLICIT`).
+   - OID quy chuẩn: `1.2.840.113549.1.9.16.2.14` (`id-aa-signatureTimeStampToken`).
+   - Vì nằm trong `unsignedAttrs`, việc nhúng timestamp token không làm thay đổi `signedAttrs` và **bảo toàn 100% chữ ký RSA ban đầu của người ký**.
+
+3. **Thẩm định mật mã độc lập (`TimestampTokenVerifier`)**:
+   - Phân tích cú pháp ASN.1 DER của `TimeStampToken` $\rightarrow$ `SignedData` $\rightarrow$ `TSTInfo`.
+   - Đối soát `messageImprint.hashedMessage` khớp chính xác với `SHA-256(SignerInfo.signatureValue)`.
+   - Đối soát `nonce` nếu request có gửi nonce.
+   - Kiểm tra chứng thư TSA nhúng: Bắt buộc có Extended Key Usage `id-kp-timeStamping` (`1.3.6.1.5.5.7.3.8`).
+   - Kiểm tra thời hạn hiệu lực: `notBefore <= genTime <= notAfter`.
+   - Xác minh chữ ký số RSA của TSA trên `TSTInfo` và SignedAttributes chứa ESS `signingCertificateV2` (RFC 5035).
+
+4. **Chính sách Vận hành Fail-Closed**:
+   - Nếu `requireTimestamp: true`, hệ thống yêu cầu bắt buộc phải lấy và xác minh thành công TimeStampToken. Nếu TSA timeout, DNS lỗi, hoặc token không hợp lệ, giao dịch ký lập tức thất bại (fail-closed), **không bao giờ fallback sang đồng hồ hệ thống nội bộ**.
+   - Bất kỳ can thiệp nhị phân nào vào tệp PDF hoặc timestamp token đều khiến `PdfSignatureVerifier.verify` đánh dấu `isTampered: true, isValid: false`.
+
 ---
 
 ## 10. TỔNG KẾT KIẾN TRÚC & RANH GIỚI HIỆN TẠI
@@ -490,8 +527,10 @@ apps/api/src/modules/signing/
 - **Đã hoàn thành Phase 13.1**: PDF Rendering Engine (`PdfGeneratorService`) và Secure Local Storage (`StorageService`).
 - **Đã hoàn thành Phase 13.2.1**: Nền tảng quản lý khóa `ISigningKeyProvider`, Keystore cục bộ bảo mật, và Certificate Registry phân quyền đa doanh nghiệp.
 - **Đã hoàn thành Phase 13.2.2**: CMS/PDF Signing Engine thực thụ với CMS Detached, PDF Signature Adapter, ByteRange allocation, Independent Verifier, và Fail-closed orchestration.
-- **Ranh giới chưa triển khai (Dành cho Phase 13.3 & 13.4)**:
-  - Chưa triển khai dịch vụ đóng dấu thời gian tin cậy (RFC 3161 TSA).
-  - Chưa triển khai PAdES B-LTA (DSS/VRI/LTV).
+- **Đã hoàn thành Phase 13.3.1**: RFC 3161 Trusted Timestamping & PAdES B-T Readiness với TSA Client, Verifier, Dev/Http TSA Providers, nhúng `id-aa-signatureTimeStampToken`, và kiểm chứng thành công bằng OpenSSL 3.5.7 CLI độc lập.
+- **Ranh giới chưa triển khai (Dành cho Phase 13.3.2 & 13.4)**:
+  - Chưa triển khai đầy đủ LTV/DSS/VRI (PAdES B-LT và B-LTA).
   - Chưa tự động ký khi tài liệu chuyển sang `APPROVED` (workflow tự động sẽ được thiết kế ở Phase 13.4).
+  - Chưa công khai tài liệu hoặc thông tin cá nhân.
+
 

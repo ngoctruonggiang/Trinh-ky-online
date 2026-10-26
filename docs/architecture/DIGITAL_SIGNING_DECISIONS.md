@@ -246,6 +246,37 @@ Nếu không có bảng quản lý chứng thư tập trung, hệ thống khó t
 
 ---
 
+## ADR-11: TÍCH HỢP DẤU THỜI GIAN TIN CẬY RFC 3161 QUA ATTRIBUTE ID-AA-SIGNATURETIMESTAMPTOKEN VÀ RANH GIỚI PADES B-T (PHASE 13.3.1)
+
+### Bối cảnh & Vấn đề
+1. Chữ ký số PAdES B-B chỉ chứa thuộc tính thời gian ký `signingTime` do ứng dụng của người ký tự khai báo, không có giá trị pháp lý chứng minh thời điểm ký vì đồng hồ máy trạm có thể bị người dùng điều chỉnh lùi/tiến.
+2. Để đạt cấp độ PAdES Baseline B-T (ETSI EN 319 142-1), chữ ký phải có bằng chứng dấu thời gian tin cậy (Trusted TimeStamp Token) được cấp bởi một máy chủ TSA độc lập theo chuẩn RFC 3161.
+3. Cần xác định chính xác dữ liệu đầu vào làm `messageImprint` cho TSA: Không được dùng PDF ByteRange digest, mà phải dùng mã băm của giá trị chữ ký người ký (`SignerInfo.signatureValue`).
+4. Vị trí nhúng TimeStampToken vào CMS phải tuân thủ chuẩn: đặt trong `unsignedAttrs` dưới OID `1.2.840.113549.1.9.16.2.14` (`id-aa-signatureTimeStampToken`).
+
+### Quyết định
+1. **Dữ liệu đầu vào cho TimeStampReq**:
+   - `messageImprint`: SHA-256 (32 bytes) của `SignerInfo.signatureValue`.
+   - Sinh `nonce` ngẫu nhiên 64-bit chống tấn công phát lại (Replay Attacks).
+   - Thiết lập `certReq: true` để TSA trả về chuỗi chứng thư số ký dấu thời gian.
+2. **Cấu trúc Nhúng Token trong CMS**:
+   - Nhúng `TimeStampToken` (ContentInfo ASN.1 DER) vào `unsignedAttrs [1] IMPLICIT` của `SignerInfo`.
+   - Vì nằm ngoài `signedAttrs`, thao tác nhúng không thay đổi hash của signedAttrs và bảo toàn nguyên vẹn chữ ký RSA của người ký.
+3. **Thẩm định Mật mã Độc lập (`TimestampTokenVerifier`)**:
+   - Xác minh `messageImprint` khớp với SHA-256 của chữ ký người ký.
+   - Xác minh `nonce` khớp với request.
+   - Xác minh chứng thư số TSA bắt buộc có EKU `id-kp-timeStamping` (`1.3.6.1.5.5.7.3.8`).
+   - Xác minh thời hạn hiệu lực tại thời điểm `genTime`.
+   - Xác minh chữ ký RSA của TSA trên `TSTInfo` và thuộc tính ký ESS `signingCertificateV2` (RFC 5035).
+4. **Chính sách Vận hành Fail-Closed**:
+   - Mặc định fail-closed khi `requireTimestamp: true`: Nếu TSA lỗi, timeout hoặc token không hợp lệ, giao dịch ký lập tức bị hủy bỏ, tuyệt đối không tự ý chuyển sang dùng đồng hồ nội bộ.
+   - Bất kỳ hành vi can thiệp nhị phân nào vào tệp PDF hoặc timestamp token đều khiến `PdfSignatureVerifier.verify` đánh dấu `isTampered: true, isValid: false`.
+5. **Ranh giới PAdES B-T**:
+   - Chưa tuyên bố đạt PAdES B-LT/B-LTA (chưa có DSS/VRI/LTV full revocation data).
+   - Môi trường DEV sử dụng `DevTestTsaProvider` tạo khóa RSA 2048-bit và chứng thư có EKU `id-kp-timeStamping` độc lập với Internet; môi trường Production cấu hình `HttpTsaProvider` kết nối tới TSA uy tín được cấp phép.
+
+---
+
 ## BẢNG TỔNG HỢP CÁC QUYẾT ĐỊNH
 
 | Mã ADR | Chủ đề | Lựa chọn chính | Trạng thái |
@@ -260,3 +291,5 @@ Nếu không có bảng quản lý chứng thư tập trung, hệ thống khó t
 | **ADR-08** | Ngữ nghĩa Ký số | Không export Private Key, chuẩn hóa `signData` vs `signDigest` | **APPROVED** |
 | **ADR-09** | Danh mục Chứng thư | Phân quyền Tenant/User, bất biến quyền sở hữu, kiểm soát thu hồi | **APPROVED** |
 | **ADR-10** | CMS/ByteRange Engine| CMS Detached, cấp phát ByteRange, chống tràn placeholder, Fail-closed self-verify | **APPROVED** |
+| **ADR-11** | RFC 3161 TSA & B-T | `id-aa-signatureTimeStampToken` trong `unsignedAttrs`, EKU verification, Fail-closed policy | **APPROVED** |
+
